@@ -58,9 +58,8 @@ const extractText = async (filePath, mimeType = '') => {
     }
 };
 
-// Helper 2: Pre-Clean PDF Running Headers, Footers & Private Unicode Bullets
+// Helper 2: Clean Running Headers, Footers & Private Unicode Bullets
 const preprocessRawText = (rawText) => {
-    // Replace private-use Unicode bullets ( / \uF0B7 / \uF0A7) with standard bullet "•" and ensure newline before bullet
     let cleaned = rawText
         .replace(/[\uF0B7\uF0A7\u2022●▪▸►]/g, '\n• ')
         .replace(/\r\n/g, '\n');
@@ -71,23 +70,24 @@ const preprocessRawText = (rawText) => {
 
     for (let i = 0; i < rawLines.length; i++) {
         const t = rawLines[i].trim();
+        if (!t) continue;
 
-        if (/^CERTIFICATE$/i.test(t)) {
+        if (t === 'CERTIFICATE') {
             seenCertificate = true;
         }
 
-        // 1. Strip running page footers: e.g., "CredSync AI — Enterprise FinOps... | Page 2" or "Page 14"
+        // 1. Strip running page footers ("CredSync AI ... Page 2", "| Page 2")
         if (/CredSync\s+AI.*Page\s*\d+/i.test(t) || /\|\s*Page\s*\d+/i.test(t) || /^Page\s*\d+(\s*of\s*\d+)?$/i.test(t)) {
             continue;
         }
 
         // 2. Strip running top header on pages 2+ ("Department of Computer Science & Engineering, Career Point University, Kota")
-        if ((seenCertificate || i > 22) && /^Department of Computer Science\s*&\s*Engineering,\s*Career Point University,\s*Kota$/i.test(t)) {
+        if (seenCertificate && /^Department of Computer Science\s*&\s*Engineering,\s*Career Point University,\s*Kota$/i.test(t)) {
             continue;
         }
 
-        // 3. Strip OCR watermark artefacts from University Logo on Cover Page ("CAREER POINT UNIVERSITY", "Get in.. Go Far")
-        if (i < 30 && /^(CAREER POINT|UNIVERSITY|Get in\.\.\s*Go Far)$/i.test(t)) {
+        // 3. Strip Cover Page Logo OCR Watermark text
+        if (!seenCertificate && /^(CAREER POINT|UNIVERSITY|Get in\.\.\s*Go Far)$/i.test(t)) {
             continue;
         }
 
@@ -97,13 +97,13 @@ const preprocessRawText = (rawText) => {
     return filteredLines;
 };
 
-// Helper 3: Parse Master TOC (Table 0.1), List of Figures (Table 0.2), & Data Tables into Structured Rows
-const buildWordTable = (headers, rows, colWidths = [18, 67, 15]) => {
+// Helper 3: Build Real Bordered MS Word Table
+const buildWordTable = (headers, rows, colWidths = [20, 65, 15]) => {
     const borderConfig = {
-        top: { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' },
-        bottom: { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' },
-        left: { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' },
-        right: { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' }
+        top: { style: BorderStyle.SINGLE, size: 6, color: '64748B' },
+        bottom: { style: BorderStyle.SINGLE, size: 6, color: '64748B' },
+        left: { style: BorderStyle.SINGLE, size: 6, color: '64748B' },
+        right: { style: BorderStyle.SINGLE, size: 6, color: '64748B' }
     };
 
     const headerRow = new TableRow({
@@ -114,7 +114,8 @@ const buildWordTable = (headers, rows, colWidths = [18, 67, 15]) => {
             borders: borderConfig,
             children: [
                 new Paragraph({
-                    spacing: { before: 60, after: 60 },
+                    alignment: idx === headers.length - 1 ? AlignmentType.CENTER : AlignmentType.LEFT,
+                    spacing: { before: 80, after: 80 },
                     children: [new TextRun({ text: h, bold: true, font: 'Times New Roman', size: 22 })]
                 })
             ]
@@ -127,9 +128,9 @@ const buildWordTable = (headers, rows, colWidths = [18, 67, 15]) => {
             borders: borderConfig,
             children: [
                 new Paragraph({
-                    alignment: idx === r.length - 1 && r.length === 3 ? AlignmentType.CENTER : AlignmentType.LEFT,
-                    spacing: { before: 50, after: 50 },
-                    children: [new TextRun({ text: String(cellText || ''), bold: idx === 0, font: 'Times New Roman', size: 21 })]
+                    alignment: idx === r.length - 1 ? AlignmentType.CENTER : AlignmentType.LEFT,
+                    spacing: { before: 60, after: 60 },
+                    children: [new TextRun({ text: String(cellText || ''), bold: idx === 0, font: 'Times New Roman', size: 22 })]
                 })
             ]
         }))
@@ -141,7 +142,23 @@ const buildWordTable = (headers, rows, colWidths = [18, 67, 15]) => {
     });
 };
 
-// Helper 4: Senior Document AST Parser (Reconstructs Tables, Code Blocks, Subheadings, Bullets & Paragraphs)
+// Helper 4: Check if a "CHAPTER X" line is a REAL Chapter Start (ALL CAPS + Next line ALL CAPS without page number)
+const isRealChapterStart = (lines, idx) => {
+    const line = lines[idx];
+    // MUST be strictly uppercase "CHAPTER 1", "CHAPTER 2", etc. (NOT "Chapter 1" from TOC!)
+    if (!/^CHAPTER\s+\d+$/.test(line)) return false;
+
+    const nextLine = (lines[idx + 1] || '').trim();
+    if (!nextLine) return false;
+
+    // If next line ends with a page number (e.g. "Introduction & Problem Formulation 1"), it is a TOC entry, NOT a real chapter!
+    if (/\s+\d+$/.test(nextLine)) return false;
+
+    // Real chapter title is UPPERCASE (e.g. "INTRODUCTION & PROBLEM FORMULATION")
+    return nextLine === nextLine.toUpperCase();
+};
+
+// Helper 5: Bulletproof Document Structure Parser
 const parseDocumentStructure = (rawText) => {
     const lines = preprocessRawText(rawText);
     const blocks = [];
@@ -159,86 +176,114 @@ const parseDocumentStructure = (rawText) => {
     while (i < lines.length) {
         const line = lines[i];
 
-        if (!line) {
-            flushPara();
-            i++;
-            continue;
+        // 1. COVER PAGE (Until strictly "CERTIFICATE")
+        if (inCoverPage) {
+            if (line === 'CERTIFICATE') {
+                inCoverPage = false;
+            } else {
+                blocks.push({ type: 'cover_line', text: line });
+                i++;
+                continue;
+            }
         }
 
-        // Exit cover page once CERTIFICATE starts
-        if (/^CERTIFICATE$/i.test(line)) {
-            inCoverPage = false;
-        }
-
-        // 1. COVER PAGE HANDLING (Keep each line distinct)
-        if (inCoverPage && i < 32) {
+        // 2. STRICT FRONT-MATTER & BACK-MATTER HEADINGS (Exact Uppercase Only)
+        if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ACKNOWLEDGEMENTS|ABSTRACT|CONTENT|CONTENTS|TABLE OF CONTENTS|REFERENCES|BIBLIOGRAPHY)$/.test(line)) {
             flushPara();
-            blocks.push({ type: 'cover_line', text: line });
-            i++;
-            continue;
-        }
-
-        // 2. MAJOR SECTION HEADERS (Trigger Page Break)
-        if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ACKNOWLEDGEMENTS|ABSTRACT|CONTENT|CONTENTS|TABLE OF CONTENTS|CHAPTER\s+\d+|REFERENCES|BIBLIOGRAPHY)$/i.test(line)) {
-            flushPara();
-            // If "CHAPTER X" is followed by its title in ALL CAPS on the next 1-2 lines, keep CHAPTER X as major_heading and next line as chapter_subtitle
             blocks.push({ type: 'major_heading', text: line });
             i++;
-            while (i < lines.length && lines[i] && lines[i] === lines[i].toUpperCase() && lines[i].length < 85 && !/^(TABLE|FIGURE|LISTING)\b/i.test(lines[i])) {
+            continue;
+        }
+
+        // 3. STRICT REAL CHAPTER HEADINGS (Strictly "CHAPTER X" in ALL CAPS followed by ALL-CAPS Subtitle)
+        if (isRealChapterStart(lines, i)) {
+            flushPara();
+            blocks.push({ type: 'major_heading', text: line });
+            i++;
+            while (i < lines.length && lines[i] === lines[i].toUpperCase() && !/^(TABLE|FIGURE|LISTING|\d+\.\d+)\b/.test(lines[i]) && lines[i].length < 85) {
                 blocks.push({ type: 'chapter_subtitle', text: lines[i] });
                 i++;
             }
             continue;
         }
 
-        // 3. TABLE 0.1: MASTER TABLE OF CONTENTS RECONSTRUCTION
+        // 4. MASTER TABLE OF CONTENTS (Table 0.1) — Collects everything until Table 0.2 or Real CHAPTER 1!
         if (/^Table\s+0\.1:\s*Master Table of Contents/i.test(line)) {
             flushPara();
-            blocks.push({ type: 'table_caption', text: line });
+            blocks.push({ type: 'table_caption', text: 'Table 0.1: Master Table of Contents' });
+
+            // Gather all raw lines belonging to Table 0.1 until Table 0.2 or real CHAPTER 1
+            const tocChunkLines = [];
+            // Strip caption prefix if first line had extra text like "Table 0.1: Master Table of Contents Section Chapter / Title Page No. —"
+            const firstLineRemainder = line.replace(/^Table\s+0\.1:\s*Master Table of Contents/i, '').trim();
+            if (firstLineRemainder) tocChunkLines.push(firstLineRemainder);
             i++;
 
-            // Skip raw column header words ("Section", "Chapter / Title", "Page No.")
-            while (i < lines.length && /^(Section|Chapter\s*\/\s*Title|Page\s*No\.?|\|)$/i.test(lines[i].replace(/\|/g, '').trim())) {
+            while (i < lines.length && !/^Table\s+0\.2:/i.test(lines[i]) && !isRealChapterStart(lines, i)) {
+                tocChunkLines.push(lines[i]);
                 i++;
             }
 
-            const tocRows = [];
-            while (i < lines.length) {
-                const l = lines[i].replace(/^\|+|\|+$/g, '').trim();
-                if (!l) { i++; continue; }
-                if (/^(Table\s+0\.2|CHAPTER\s+1)$/i.test(l)) break;
+            // Join and clean header tokens from TOC chunk
+            const tocStream = tocChunkLines
+                .join('\n')
+                .replace(/Section\s*\|?\s*Chapter\s*\/\s*Title\s*\|?\s*Page\s*No\.?/gi, '')
+                .replace(/\|/g, ' ')
+                .split('\n')
+                .map(s => s.trim())
+                .filter(Boolean);
 
-                // Match "—" or "Chapter X" rows
-                if (/^(—|-|Chapter\s+\d+)$/i.test(l)) {
-                    const sec = l;
-                    const titleParts = [];
-                    i++;
-                    while (i < lines.length) {
-                        const nextL = lines[i].replace(/^\|+|\|+$/g, '').trim();
-                        if (!nextL) { i++; continue; }
-                        if (/^(ii|iii|iv|v|vi|\d+)$/i.test(nextL)) {
-                            tocRows.push([sec, titleParts.join(' '), nextL]);
-                            i++;
+            const tocRows = [];
+            let k = 0;
+            while (k < tocStream.length) {
+                const item = tocStream[k];
+
+                // Case A: Standalone "—" or "Chapter X" on its own line
+                if (/^(—|-|Chapter\s+\d+)$/i.test(item)) {
+                    const sec = item;
+                    k++;
+                    let titleBuf = [];
+                    let pageNo = '';
+                    while (k < tocStream.length && !/^(—|-|Chapter\s+\d+)$/i.test(tocStream[k])) {
+                        const cur = tocStream[k];
+                        const pageMatch = cur.match(/^(.*?)\s+(ii|iii|iv|v|vi|\d+)$/i);
+                        if (pageMatch && pageMatch[1].trim().length > 0) {
+                            titleBuf.push(pageMatch[1].trim());
+                            pageNo = pageMatch[2];
+                            k++;
                             break;
-                        }
-                        // Check if page number is at the end of the same line
-                        const inlinePageMatch = nextL.match(/^(.*?)\s+(ii|iii|iv|v|vi|\d+)$/i);
-                        if (inlinePageMatch && inlinePageMatch[1].length > 3) {
-                            titleParts.push(inlinePageMatch[1].trim());
-                            tocRows.push([sec, titleParts.join(' '), inlinePageMatch[2]]);
-                            i++;
+                        } else if (/^(ii|iii|iv|v|vi|\d+)$/i.test(cur)) {
+                            pageNo = cur;
+                            k++;
                             break;
+                        } else {
+                            titleBuf.push(cur);
+                            k++;
                         }
-                        titleParts.push(nextL);
-                        i++;
                     }
-                } else {
-                    const matchLine = l.match(/^(—|-|Chapter\s+\d+)\s+(.*?)\s+(ii|iii|iv|v|vi|\d+)$/i);
-                    if (matchLine) {
-                        tocRows.push([matchLine[1], matchLine[2], matchLine[3]]);
+                    if (titleBuf.length > 0) {
+                        tocRows.push([sec, titleBuf.join(' '), pageNo]);
                     }
-                    i++;
+                    continue;
                 }
+
+                // Case B: Combined line like "— Content, List of Figures & List of Tables v"
+                const inlineToc = item.match(/^(—|-|Chapter\s+\d+)\s+(.*?)\s+(ii|iii|iv|v|vi|\d+)$/i);
+                if (inlineToc) {
+                    tocRows.push([inlineToc[1], inlineToc[2].trim(), inlineToc[3]]);
+                    k++;
+                    continue;
+                }
+
+                // Case C: Title + PageNo when "—" was at the end of previous header line (e.g. "Certificate ii")
+                const frontMatterMatch = item.match(/^(Certificate|Acknowledgement|Abstract|Content.*)\s+(ii|iii|iv|v|vi)$/i);
+                if (frontMatterMatch) {
+                    tocRows.push(['—', frontMatterMatch[1].trim(), frontMatterMatch[2]]);
+                    k++;
+                    continue;
+                }
+
+                k++;
             }
 
             if (tocRows.length > 0) {
@@ -252,63 +297,42 @@ const parseDocumentStructure = (rawText) => {
             continue;
         }
 
-        // 4. TABLE 0.2: LIST OF FIGURES RECONSTRUCTION
+        // 5. LIST OF FIGURES (Table 0.2) — Collects everything until Real CHAPTER 1!
         if (/^Table\s+0\.2:\s*List of Figures/i.test(line)) {
             flushPara();
-            blocks.push({ type: 'table_caption', text: line });
+            blocks.push({ type: 'table_caption', text: 'Table 0.2: List of Figures' });
+
+            const figChunkLines = [];
+            const remainder = line.replace(/^Table\s+0\.2:\s*List of Figures/i, '').trim();
+            if (remainder) figChunkLines.push(remainder);
             i++;
 
-            while (i < lines.length && /^(Figure\s*No\.?|Figure\s*Caption|Page\s*No\.?|\|)$/i.test(lines[i].replace(/\|/g, '').trim())) {
+            while (i < lines.length && !isRealChapterStart(lines, i)) {
+                figChunkLines.push(lines[i]);
                 i++;
             }
 
-            const figRows = [];
-            while (i < lines.length) {
-                const l = lines[i].replace(/^\|+|\|+$/g, '').trim();
-                if (!l) { i++; continue; }
-                if (/^(CHAPTER\s+1|INTRODUCTION)/i.test(l)) break;
+            const fullFigText = figChunkLines
+                .join(' ')
+                .replace(/Figure\s*No\.?\s*\|?\s*Figure\s*Caption\s*\|?\s*Page\s*No\.?/gi, '')
+                .replace(/\|/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
 
-                if (/^Figure\s+\d+\.\d+/i.test(l)) {
-                    let figNo = l;
-                    const capParts = [];
-                    const inlineSplit = l.match(/^(Figure\s+\d+\.\d+)\s+(.+)$/i);
-                    if (inlineSplit) {
-                        figNo = inlineSplit[1];
-                        capParts.push(inlineSplit[2]);
-                    }
-                    i++;
-                    let pageNum = '';
-                    while (i < lines.length) {
-                        const nextL = lines[i].replace(/^\|+|\|+$/g, '').trim();
-                        if (!nextL) { i++; continue; }
-                        if (/^(CHAPTER\s+1|Figure\s+\d+\.\d+)/i.test(nextL)) break;
-                        if (/^\d+$/.test(nextL)) {
-                            pageNum = nextL;
-                            i++;
-                            // Check if next line is wrapped caption continuation like "& AI Risk Insights"
-                            while (i < lines.length && lines[i].trim().startsWith('&')) {
-                                capParts.push(lines[i].replace(/^\|+|\|+$/g, '').trim());
-                                i++;
-                            }
-                            break;
-                        }
-                        const endNum = nextL.match(/^(.*?)\s+(\d+)$/);
-                        if (endNum) {
-                            capParts.push(endNum[1]);
-                            pageNum = endNum[2];
-                            i++;
-                            while (i < lines.length && lines[i].trim().startsWith('&')) {
-                                capParts.push(lines[i].replace(/^\|+|\|+$/g, '').trim());
-                                i++;
-                            }
-                            break;
-                        }
-                        capParts.push(nextL);
-                        i++;
-                    }
-                    figRows.push([figNo, capParts.join(' '), pageNum]);
-                } else {
-                    i++;
+            // Match each "Figure X.Y ... <PageNo>" entry cleanly using regex lookahead
+            const figRows = [];
+            const figRegex = /(Figure\s+\d+\.\d+)\s+([\s\S]*?)\s+(\d+)(?=\s+Figure\s+\d+\.\d+|$)/gi;
+            let match;
+            while ((match = figRegex.exec(fullFigText)) !== null) {
+                let caption = match[2].trim();
+                const pageNo = match[3].trim();
+                figRows.push([match[1], caption, pageNo]);
+            }
+
+            // Fix trailing wrapped fragment like "& AI Risk Insights" if it appeared after page number 23
+            for (let r = 0; r < figRows.length; r++) {
+                if (figRows[r][1].startsWith('& AI Risk Insights')) {
+                    figRows[r][1] = figRows[r][1].replace(/^&\s*AI Risk Insights\s*/i, '');
                 }
             }
 
@@ -323,17 +347,26 @@ const parseDocumentStructure = (rawText) => {
             continue;
         }
 
-        // 5. NUMBERED SUBHEADINGS (e.g. "1.1 Background...", "2.2.1 Asynchronous...")
-        const subHeadingMatch = line.match(/^(\d+\.\d+(?:\.\d+)?)\s+([A-Z].*)$/);
-        if (subHeadingMatch) {
+        // 6. NUMBERED SUBHEADINGS (even if merged inside a line or at start of line: "1.1 ...", "2.2.1 ...")
+        const subMatch = line.match(/^(\d+\.\d+(?:\.\d+)?)\s+([A-Z][A-Za-z0-9\s,&\-\(\)\/\.]+)$/);
+        if (subMatch && line.length < 95) {
             flushPara();
-            // Sometimes PDF merges heading and first sentence on same line if long; split if needed
             blocks.push({ type: 'subheading', text: line });
             i++;
             continue;
         }
 
-        // 6. CODE LISTINGS (e.g. "Listing 4.1: ...", "Listing 5.1: ...")
+        // Handle inline subheading where PDF merged heading + body on the same line
+        const inlineSubMatch = line.match(/^(\d+\.\d+(?:\.\d+)?\s+[A-Z][^\.]{4,75}?)\s+([A-Z][a-z]+\s+.*)$/);
+        if (inlineSubMatch && /^(1\.|2\.|3\.|4\.|5\.|6\.|7\.|8\.|9\.|10\.)/.test(line)) {
+            flushPara();
+            blocks.push({ type: 'subheading', text: inlineSubMatch[1].trim() });
+            currentPara = inlineSubMatch[2].trim();
+            i++;
+            continue;
+        }
+
+        // 7. CODE LISTINGS (Listing 4.1, Listing 5.1, etc.)
         if (/^Listing\s+\d+\.\d+[A-Z]?:/i.test(line)) {
             flushPara();
             blocks.push({ type: 'listing_caption', text: line });
@@ -341,10 +374,9 @@ const parseDocumentStructure = (rawText) => {
             const codeLines = [];
             while (i < lines.length) {
                 const cl = lines[i];
-                if (!cl) { i++; continue; }
-                // Stop code block when next section, figure, table, or listing starts
                 if (
-                    /^(\d+\.\d+\s+[A-Z]|Figure\s+\d+\.\d+|Table\s+\d+\.\d+|Listing\s+\d+\.\d+|CHAPTER\s+\d+)/i.test(cl)
+                    isRealChapterStart(lines, i) ||
+                    /^(\d+\.\d+\s+[A-Z]|Figure\s+\d+\.\d+:|Table\s+\d+\.\d+:|Listing\s+\d+\.\d+[A-Z]?:)/i.test(cl)
                 ) {
                     break;
                 }
@@ -357,7 +389,7 @@ const parseDocumentStructure = (rawText) => {
             continue;
         }
 
-        // 7. OTHER REPORT TABLES (Table 2.1, Table 3.1, Table 5.1, Table 8.1, Table 9.1, Table 9.2)
+        // 8. DATA TABLES IN CHAPTERS (Table 2.1, Table 3.1, Table 5.1, Table 8.1, Table 9.1, Table 9.2)
         if (/^Table\s+\d+\.\d+:/i.test(line)) {
             flushPara();
             blocks.push({ type: 'table_caption', text: line });
@@ -365,7 +397,7 @@ const parseDocumentStructure = (rawText) => {
             continue;
         }
 
-        // 8. FIGURE CAPTIONS (Figure 4.1: ..., Figure 6.1: ...)
+        // 9. FIGURE CAPTIONS (Figure 4.1: ..., Figure 6.1: ...)
         if (/^Figure\s+\d+\.\d+:/i.test(line)) {
             flushPara();
             blocks.push({ type: 'figure_caption', text: line });
@@ -373,15 +405,16 @@ const parseDocumentStructure = (rawText) => {
             continue;
         }
 
-        // 9. BULLET POINTS & REFERENCES ([1], [2], • ...)
-        if (/^(•|\[\d+\])\s+/.test(line)) {
+        // 10. BULLET POINTS & REFERENCES (• or [1], [2])
+        if (/^(•|\[\d+\])\s*/.test(line)) {
             flushPara();
             let bulletText = line;
             i++;
-            while (i < lines.length && lines[i]) {
+            while (i < lines.length) {
                 const nextL = lines[i];
                 if (
-                    /^(•|\[\d+\]|\d+\.\d+\s+[A-Z]|CHAPTER\s+\d+|Figure\s+\d+\.\d+|Table\s+\d+\.\d+|Listing\s+\d+\.\d+)/i.test(nextL)
+                    isRealChapterStart(lines, i) ||
+                    /^(•|\[\d+\]|\d+\.\d+\s+[A-Z]|Figure\s+\d+\.\d+:|Table\s+\d+\.\d+:|Listing\s+\d+\.\d+)/i.test(nextL)
                 ) {
                     break;
                 }
@@ -392,7 +425,7 @@ const parseDocumentStructure = (rawText) => {
             continue;
         }
 
-        // 10. SIGNATURE / SHORT METADATA LINES IN CERTIFICATE & ACKNOWLEDGEMENT
+        // 11. SHORT METADATA / SIGNATURES
         if (/^(Pranav Sharma|KID:\s*K26200|B\.Tech\s+CSE|Date:|Mr\.\s+Rohit Maheshwari|Head of Department|Supervisor|Mr\.\s+Gaurav Jain|Assistant Professor|Keywords:)/i.test(line)) {
             flushPara();
             blocks.push({ type: 'meta_line', text: line });
@@ -400,15 +433,23 @@ const parseDocumentStructure = (rawText) => {
             continue;
         }
 
-        // 11. STANDARD BODY PARAGRAPH REFLOW
+        // 12. NORMAL PARAGRAPH REFLOW (Check if a numbered subheading got stuck at the end of a paragraph)
+        const embeddedSub = line.match(/^(.*?\.)\s+(\d+\.\d+(?:\.\d+)?\s+[A-Z].*)$/);
+        if (embeddedSub) {
+            currentPara += (currentPara ? ' ' : '') + embeddedSub[1];
+            flushPara();
+            blocks.push({ type: 'subheading', text: embeddedSub[2] });
+            i++;
+            continue;
+        }
+
         if (!currentPara) {
             currentPara = line;
         } else {
             currentPara += ' ' + line;
         }
 
-        // Flush paragraph on sentence end if reasonably sized
-        if (/[\.\!\?]$/.test(line) && currentPara.length > 220) {
+        if (/[\.\!\?]$/.test(line) && currentPara.length > 240) {
             flushPara();
         }
         i++;
@@ -418,7 +459,7 @@ const parseDocumentStructure = (rawText) => {
     return blocks;
 };
 
-// Helper 5: Universal Target Document Generator (DOCX, PDF, TXT)
+// Helper 6: Universal Document Writer (DOCX, PDF, TXT)
 const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
     const blocks = parseDocumentStructure(rawText);
 
@@ -427,7 +468,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
             if (b.type === 'table') {
                 const hdr = b.headers.join(' | ');
                 const rws = b.rows.map(r => r.join(' | ')).join('\n');
-                return `${hdr}\n${'-'.repeat(50)}\n${rws}`;
+                return `${hdr}\n${'-'.repeat(55)}\n${rws}`;
             }
             if (b.type === 'code_block') return b.lines.join('\n');
             return b.text || '';
@@ -462,7 +503,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
             }
 
             if (b.type === 'major_heading') {
-                if (idx > 3) {
+                if (idx > 2) {
                     docChildren.push(new Paragraph({ children: [new PageBreak()] }));
                 }
                 docChildren.push(new Paragraph({
@@ -483,7 +524,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
             if (b.type === 'chapter_subtitle') {
                 docChildren.push(new Paragraph({
                     alignment: AlignmentType.CENTER,
-                    spacing: { before: 40, after: 180, line: 276 },
+                    spacing: { before: 40, after: 200, line: 276 },
                     children: [
                         new TextRun({
                             text: b.text,
@@ -499,7 +540,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
             if (b.type === 'subheading') {
                 docChildren.push(new Paragraph({
                     alignment: AlignmentType.LEFT,
-                    spacing: { before: 180, after: 80, line: 276 },
+                    spacing: { before: 200, after: 90, line: 276 },
                     children: [
                         new TextRun({
                             text: b.text,
@@ -515,12 +556,12 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
             if (b.type === 'table_caption' || b.type === 'figure_caption' || b.type === 'listing_caption') {
                 docChildren.push(new Paragraph({
                     alignment: b.type === 'figure_caption' ? AlignmentType.CENTER : AlignmentType.LEFT,
-                    spacing: { before: 160, after: 80, line: 276 },
+                    spacing: { before: 160, after: 90, line: 276 },
                     children: [
                         new TextRun({
                             text: b.text,
                             font: 'Times New Roman',
-                            size: 22, // 11pt Bold Italic
+                            size: 23,
                             bold: true,
                             italics: b.type === 'figure_caption'
                         })
@@ -531,7 +572,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
 
             if (b.type === 'table') {
                 docChildren.push(buildWordTable(b.headers, b.rows, b.colWidths));
-                docChildren.push(new Paragraph({ spacing: { before: 80, after: 80 }, children: [] }));
+                docChildren.push(new Paragraph({ spacing: { before: 120, after: 120 }, children: [] }));
                 return;
             }
 
@@ -545,7 +586,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
                             new TextRun({
                                 text: codeLine,
                                 font: 'Courier New',
-                                size: 19 // 9.5pt Monospace Code
+                                size: 19
                             })
                         ]
                     }));
@@ -554,10 +595,9 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
             }
 
             if (b.type === 'bullet') {
-                // Highlight lead-in bold label before colon (e.g. "• Fragmented Paper Ledgers: Physical registers...")
                 const colonIdx = b.text.indexOf(':');
                 const childrenRuns = [];
-                if (colonIdx > 2 && colonIdx < 65) {
+                if (colonIdx > 2 && colonIdx < 68) {
                     childrenRuns.push(new TextRun({
                         text: b.text.slice(0, colonIdx + 1),
                         font: 'Times New Roman',
@@ -580,7 +620,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
                 docChildren.push(new Paragraph({
                     alignment: AlignmentType.BOTH,
                     indent: { left: 360 },
-                    spacing: { before: 60, after: 60, line: 276 },
+                    spacing: { before: 70, after: 70, line: 276 },
                     children: childrenRuns
                 }));
                 return;
@@ -589,7 +629,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
             if (b.type === 'meta_line') {
                 docChildren.push(new Paragraph({
                     alignment: AlignmentType.LEFT,
-                    spacing: { before: 60, after: 60, line: 276 },
+                    spacing: { before: 70, after: 70, line: 276 },
                     children: [
                         new TextRun({
                             text: b.text,
@@ -602,10 +642,9 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
                 return;
             }
 
-            // Standard Body Paragraph (12pt Times New Roman, Justified)
             docChildren.push(new Paragraph({
                 alignment: AlignmentType.BOTH,
-                spacing: { before: 80, after: 90, line: 288 },
+                spacing: { before: 90, after: 100, line: 288 },
                 children: [
                     new TextRun({
                         text: b.text,
@@ -642,7 +681,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
 
             blocks.forEach((b, idx) => {
                 if (b.type === 'major_heading') {
-                    if (idx > 3) pdfDoc.addPage();
+                    if (idx > 2) pdfDoc.addPage();
                     pdfDoc.font('Times-Bold').fontSize(16).text(b.text, { align: 'center', paragraphGap: 6 });
                 } else if (b.type === 'chapter_subtitle') {
                     pdfDoc.font('Times-Bold').fontSize(14).text(b.text, { align: 'center', paragraphGap: 10 });
@@ -678,7 +717,7 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
     }
 };
 
-// Helper 6: Variance & Formatting Audit Engine
+// Helper 7: Variance & Formatting Audit Engine
 const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Name, preText1 = null, preText2 = null) => {
     const startTime = Date.now();
     const text1 = preText1 !== null ? preText1 : await extractText(file1Path, '');
@@ -712,9 +751,6 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
     const multiSpaceMatches1 = (text1.match(/[ \t]{2,}/g) || []).length;
     const multiSpaceMatches2 = (text2.match(/[ \t]{2,}/g) || []).length;
     const indentationLoss = Math.abs(multiSpaceMatches1 - multiSpaceMatches2);
-    const emptyLines1 = lines1 - nonEmptyParas1;
-    const emptyLines2 = lines2 - nonEmptyParas2;
-    const spacingCollapse = Math.abs(emptyLines1 - emptyLines2);
 
     const lineBreakPenalty = Math.min(30, (Math.abs(lines1 - lines2) / Math.max(lines1, 1)) * 35);
     const whitespacePenalty = Math.min(20, (Math.abs(charDiff) / Math.max(charCount1, 1)) * 90);
