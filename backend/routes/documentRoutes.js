@@ -7,7 +7,20 @@ const PDFDocument = require('pdfkit');
 const docx = require('docx');
 const pdfExtract = require('pdf-extraction');
 
-const { Document, Packer, Paragraph, TextRun, AlignmentType, PageBreak } = docx;
+const {
+    Document,
+    Packer,
+    Paragraph,
+    TextRun,
+    AlignmentType,
+    PageBreak,
+    Table,
+    TableRow,
+    TableCell,
+    WidthType,
+    BorderStyle
+} = docx;
+
 const router = express.Router();
 
 if (!fs.existsSync('uploads')) {
@@ -19,12 +32,12 @@ const storage = multer.diskStorage({
     filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname.replace(/\s+/g, '_'))
 });
 
-const upload = multer({ 
+const upload = multer({
     storage: storage,
     limits: { fileSize: 200 * 1024 * 1024 }
 });
 
-// Helper 1: Universal Text Extractor (Supports PDF, DOCX, and TXT!)
+// Helper 1: Universal Text Extractor (PDF, DOCX, TXT)
 const extractText = async (filePath, mimeType = '') => {
     const lowerPath = filePath.toLowerCase();
     if (mimeType === 'application/pdf' || lowerPath.endsWith('.pdf')) {
@@ -33,7 +46,7 @@ const extractText = async (filePath, mimeType = '') => {
         const data = await parseFn(dataBuffer);
         return data.text || '';
     } else if (
-        mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
+        mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
         lowerPath.endsWith('.docx')
     ) {
         const result = await mammoth.extractRawText({ path: filePath });
@@ -45,272 +58,559 @@ const extractText = async (filePath, mimeType = '') => {
     }
 };
 
-// Helper 1B: Extract Rich Structured Blocks from DOCX
-const extractStructuredDocxLines = async (filePath) => {
-    try {
-        const htmlResult = await mammoth.convertToHtml({ path: filePath });
-        const html = htmlResult.value || '';
-        if (!html) return null;
+// Helper 2: Pre-Clean PDF Running Headers, Footers & Private Unicode Bullets
+const preprocessRawText = (rawText) => {
+    // Replace private-use Unicode bullets ( / \uF0B7 / \uF0A7) with standard bullet "•" and ensure newline before bullet
+    let cleaned = rawText
+        .replace(/[\uF0B7\uF0A7\u2022●▪▸►]/g, '\n• ')
+        .replace(/\r\n/g, '\n');
 
-        const blockRegex = /<(h[1-6]|p|li)[^>]*>([\s\S]*?)<\/\1>/gi;
-        const blocks = [];
-        let match;
-
-        while ((match = blockRegex.exec(html)) !== null) {
-            const tag = match[1].toLowerCase();
-            const innerHtml = match[2];
-            const cleanText = innerHtml
-                .replace(/<br\s*\/?>/gi, '\n')
-                .replace(/<[^>]+>/g, '')
-                .replace(/&nbsp;/g, ' ')
-                .replace(/&amp;/g, '&')
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .replace(/&quot;/g, '"')
-                .trim();
-
-            if (!cleanText) continue;
-            blocks.push({
-                tag,
-                text: tag === 'li' ? `• ${cleanText}` : cleanText,
-                hasBold: /<(strong|b)\b/i.test(innerHtml),
-                hasItalic: /<(em|i)\b/i.test(innerHtml)
-            });
-        }
-        return blocks.length > 0 ? blocks : null;
-    } catch (e) {
-        return null;
-    }
-};
-
-// Helper 2: Smart Paragraph Reflow Engine (Fixes 38 pages turning into 69 pages!)
-// Merges broken PDF line-wraps back into natural paragraphs while keeping headings/lists separate
-const reflowLinesIntoParagraphs = (rawText) => {
-    const rawLines = rawText.split(/\r?\n/);
-    const blocks = [];
-    let currentPara = '';
-    let inCoverArea = true;
-
-    const isStandaloneLine = (trimmed, idx) => {
-        if (!trimmed) return true;
-        // Stop cover area once main content or TOC starts
-        if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ABSTRACT|TABLE OF CONTENTS|CHAPTER\s+1|Follow following points)/i.test(trimmed)) {
-            inCoverArea = false;
-        }
-        // Keep cover page lines separate (first 28 lines if short)
-        if (inCoverArea && idx < 28 && trimmed.length < 75) return true;
-        // Major section headers
-        if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ACKNOWLEDGEMENTS|ABSTRACT|TABLE OF CONTENTS|LIST OF FIGURES|LIST OF TABLES|CHAPTER\s+\d+|REFERENCES|BIBLIOGRAPHY)/i.test(trimmed)) return true;
-        // TOC lines with dots or trailing page numbers (e.g. "1. Introduction ...... 5" or "Chapter 1   12")
-        if (/\.{3,}|\s{3,}\d+$/.test(trimmed)) return true;
-        // Bullet points or numbered lists
-        if (/^([•●▪▸►\-\*]|\d+[\.\)]|\([a-z0-9]+\))\s+/i.test(trimmed)) return true;
-        // Short ALL-CAPS headings or lines ending with colon
-        if (trimmed.length < 75 && trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed)) return true;
-        if (trimmed.endsWith(':') && trimmed.length < 65) return true;
-        // Short metadata labels
-        if (/^(Submitted To|Submitted By|Guided By|Supervisor|Mr\.|Ms\.|Dr\.|Prof\.|Department of|Career Point|Rajasthan|Page\s*\d+)/i.test(trimmed) && trimmed.length < 75) return true;
-
-        return false;
-    };
+    const rawLines = cleaned.split('\n');
+    const filteredLines = [];
+    let seenCertificate = false;
 
     for (let i = 0; i < rawLines.length; i++) {
-        const trimmed = rawLines[i].trim();
+        const t = rawLines[i].trim();
 
-        // Remove running page footers like "... | Page 2" or "Page 12 of 38" so they don't break paragraphs
-        if (/\|\s*Page\s*\d+/i.test(trimmed) || /^Page\s*\d+(\s*of\s*\d+)?$/i.test(trimmed)) {
+        if (/^CERTIFICATE$/i.test(t)) {
+            seenCertificate = true;
+        }
+
+        // 1. Strip running page footers: e.g., "CredSync AI — Enterprise FinOps... | Page 2" or "Page 14"
+        if (/CredSync\s+AI.*Page\s*\d+/i.test(t) || /\|\s*Page\s*\d+/i.test(t) || /^Page\s*\d+(\s*of\s*\d+)?$/i.test(t)) {
             continue;
         }
 
-        if (!trimmed) {
-            if (currentPara) {
-                blocks.push({ text: currentPara, meta: null });
-                currentPara = '';
+        // 2. Strip running top header on pages 2+ ("Department of Computer Science & Engineering, Career Point University, Kota")
+        if ((seenCertificate || i > 22) && /^Department of Computer Science\s*&\s*Engineering,\s*Career Point University,\s*Kota$/i.test(t)) {
+            continue;
+        }
+
+        // 3. Strip OCR watermark artefacts from University Logo on Cover Page ("CAREER POINT UNIVERSITY", "Get in.. Go Far")
+        if (i < 30 && /^(CAREER POINT|UNIVERSITY|Get in\.\.\s*Go Far)$/i.test(t)) {
+            continue;
+        }
+
+        filteredLines.push(t);
+    }
+
+    return filteredLines;
+};
+
+// Helper 3: Parse Master TOC (Table 0.1), List of Figures (Table 0.2), & Data Tables into Structured Rows
+const buildWordTable = (headers, rows, colWidths = [18, 67, 15]) => {
+    const borderConfig = {
+        top: { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' },
+        bottom: { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' },
+        left: { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' },
+        right: { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' }
+    };
+
+    const headerRow = new TableRow({
+        tableHeader: true,
+        children: headers.map((h, idx) => new TableCell({
+            width: { size: colWidths[idx] || Math.floor(100 / headers.length), type: WidthType.PERCENTAGE },
+            shading: { fill: 'E2E8F0' },
+            borders: borderConfig,
+            children: [
+                new Paragraph({
+                    spacing: { before: 60, after: 60 },
+                    children: [new TextRun({ text: h, bold: true, font: 'Times New Roman', size: 22 })]
+                })
+            ]
+        }))
+    });
+
+    const dataRows = rows.map(r => new TableRow({
+        children: r.map((cellText, idx) => new TableCell({
+            width: { size: colWidths[idx] || Math.floor(100 / headers.length), type: WidthType.PERCENTAGE },
+            borders: borderConfig,
+            children: [
+                new Paragraph({
+                    alignment: idx === r.length - 1 && r.length === 3 ? AlignmentType.CENTER : AlignmentType.LEFT,
+                    spacing: { before: 50, after: 50 },
+                    children: [new TextRun({ text: String(cellText || ''), bold: idx === 0, font: 'Times New Roman', size: 21 })]
+                })
+            ]
+        }))
+    }));
+
+    return new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        rows: [headerRow, ...dataRows]
+    });
+};
+
+// Helper 4: Senior Document AST Parser (Reconstructs Tables, Code Blocks, Subheadings, Bullets & Paragraphs)
+const parseDocumentStructure = (rawText) => {
+    const lines = preprocessRawText(rawText);
+    const blocks = [];
+    let currentPara = '';
+    let inCoverPage = true;
+    let i = 0;
+
+    const flushPara = () => {
+        if (currentPara.trim()) {
+            blocks.push({ type: 'paragraph', text: currentPara.trim() });
+            currentPara = '';
+        }
+    };
+
+    while (i < lines.length) {
+        const line = lines[i];
+
+        if (!line) {
+            flushPara();
+            i++;
+            continue;
+        }
+
+        // Exit cover page once CERTIFICATE starts
+        if (/^CERTIFICATE$/i.test(line)) {
+            inCoverPage = false;
+        }
+
+        // 1. COVER PAGE HANDLING (Keep each line distinct)
+        if (inCoverPage && i < 32) {
+            flushPara();
+            blocks.push({ type: 'cover_line', text: line });
+            i++;
+            continue;
+        }
+
+        // 2. MAJOR SECTION HEADERS (Trigger Page Break)
+        if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ACKNOWLEDGEMENTS|ABSTRACT|CONTENT|CONTENTS|TABLE OF CONTENTS|CHAPTER\s+\d+|REFERENCES|BIBLIOGRAPHY)$/i.test(line)) {
+            flushPara();
+            // If "CHAPTER X" is followed by its title in ALL CAPS on the next 1-2 lines, keep CHAPTER X as major_heading and next line as chapter_subtitle
+            blocks.push({ type: 'major_heading', text: line });
+            i++;
+            while (i < lines.length && lines[i] && lines[i] === lines[i].toUpperCase() && lines[i].length < 85 && !/^(TABLE|FIGURE|LISTING)\b/i.test(lines[i])) {
+                blocks.push({ type: 'chapter_subtitle', text: lines[i] });
+                i++;
             }
             continue;
         }
 
-        if (isStandaloneLine(trimmed, i)) {
-            if (currentPara) {
-                blocks.push({ text: currentPara, meta: null });
-                currentPara = '';
+        // 3. TABLE 0.1: MASTER TABLE OF CONTENTS RECONSTRUCTION
+        if (/^Table\s+0\.1:\s*Master Table of Contents/i.test(line)) {
+            flushPara();
+            blocks.push({ type: 'table_caption', text: line });
+            i++;
+
+            // Skip raw column header words ("Section", "Chapter / Title", "Page No.")
+            while (i < lines.length && /^(Section|Chapter\s*\/\s*Title|Page\s*No\.?|\|)$/i.test(lines[i].replace(/\|/g, '').trim())) {
+                i++;
             }
-            blocks.push({ text: trimmed, meta: null });
+
+            const tocRows = [];
+            while (i < lines.length) {
+                const l = lines[i].replace(/^\|+|\|+$/g, '').trim();
+                if (!l) { i++; continue; }
+                if (/^(Table\s+0\.2|CHAPTER\s+1)$/i.test(l)) break;
+
+                // Match "—" or "Chapter X" rows
+                if (/^(—|-|Chapter\s+\d+)$/i.test(l)) {
+                    const sec = l;
+                    const titleParts = [];
+                    i++;
+                    while (i < lines.length) {
+                        const nextL = lines[i].replace(/^\|+|\|+$/g, '').trim();
+                        if (!nextL) { i++; continue; }
+                        if (/^(ii|iii|iv|v|vi|\d+)$/i.test(nextL)) {
+                            tocRows.push([sec, titleParts.join(' '), nextL]);
+                            i++;
+                            break;
+                        }
+                        // Check if page number is at the end of the same line
+                        const inlinePageMatch = nextL.match(/^(.*?)\s+(ii|iii|iv|v|vi|\d+)$/i);
+                        if (inlinePageMatch && inlinePageMatch[1].length > 3) {
+                            titleParts.push(inlinePageMatch[1].trim());
+                            tocRows.push([sec, titleParts.join(' '), inlinePageMatch[2]]);
+                            i++;
+                            break;
+                        }
+                        titleParts.push(nextL);
+                        i++;
+                    }
+                } else {
+                    const matchLine = l.match(/^(—|-|Chapter\s+\d+)\s+(.*?)\s+(ii|iii|iv|v|vi|\d+)$/i);
+                    if (matchLine) {
+                        tocRows.push([matchLine[1], matchLine[2], matchLine[3]]);
+                    }
+                    i++;
+                }
+            }
+
+            if (tocRows.length > 0) {
+                blocks.push({
+                    type: 'table',
+                    headers: ['Section', 'Chapter / Title', 'Page No.'],
+                    rows: tocRows,
+                    colWidths: [18, 68, 14]
+                });
+            }
+            continue;
+        }
+
+        // 4. TABLE 0.2: LIST OF FIGURES RECONSTRUCTION
+        if (/^Table\s+0\.2:\s*List of Figures/i.test(line)) {
+            flushPara();
+            blocks.push({ type: 'table_caption', text: line });
+            i++;
+
+            while (i < lines.length && /^(Figure\s*No\.?|Figure\s*Caption|Page\s*No\.?|\|)$/i.test(lines[i].replace(/\|/g, '').trim())) {
+                i++;
+            }
+
+            const figRows = [];
+            while (i < lines.length) {
+                const l = lines[i].replace(/^\|+|\|+$/g, '').trim();
+                if (!l) { i++; continue; }
+                if (/^(CHAPTER\s+1|INTRODUCTION)/i.test(l)) break;
+
+                if (/^Figure\s+\d+\.\d+/i.test(l)) {
+                    let figNo = l;
+                    const capParts = [];
+                    const inlineSplit = l.match(/^(Figure\s+\d+\.\d+)\s+(.+)$/i);
+                    if (inlineSplit) {
+                        figNo = inlineSplit[1];
+                        capParts.push(inlineSplit[2]);
+                    }
+                    i++;
+                    let pageNum = '';
+                    while (i < lines.length) {
+                        const nextL = lines[i].replace(/^\|+|\|+$/g, '').trim();
+                        if (!nextL) { i++; continue; }
+                        if (/^(CHAPTER\s+1|Figure\s+\d+\.\d+)/i.test(nextL)) break;
+                        if (/^\d+$/.test(nextL)) {
+                            pageNum = nextL;
+                            i++;
+                            // Check if next line is wrapped caption continuation like "& AI Risk Insights"
+                            while (i < lines.length && lines[i].trim().startsWith('&')) {
+                                capParts.push(lines[i].replace(/^\|+|\|+$/g, '').trim());
+                                i++;
+                            }
+                            break;
+                        }
+                        const endNum = nextL.match(/^(.*?)\s+(\d+)$/);
+                        if (endNum) {
+                            capParts.push(endNum[1]);
+                            pageNum = endNum[2];
+                            i++;
+                            while (i < lines.length && lines[i].trim().startsWith('&')) {
+                                capParts.push(lines[i].replace(/^\|+|\|+$/g, '').trim());
+                                i++;
+                            }
+                            break;
+                        }
+                        capParts.push(nextL);
+                        i++;
+                    }
+                    figRows.push([figNo, capParts.join(' '), pageNum]);
+                } else {
+                    i++;
+                }
+            }
+
+            if (figRows.length > 0) {
+                blocks.push({
+                    type: 'table',
+                    headers: ['Figure No.', 'Figure Caption', 'Page No.'],
+                    rows: figRows,
+                    colWidths: [18, 68, 14]
+                });
+            }
+            continue;
+        }
+
+        // 5. NUMBERED SUBHEADINGS (e.g. "1.1 Background...", "2.2.1 Asynchronous...")
+        const subHeadingMatch = line.match(/^(\d+\.\d+(?:\.\d+)?)\s+([A-Z].*)$/);
+        if (subHeadingMatch) {
+            flushPara();
+            // Sometimes PDF merges heading and first sentence on same line if long; split if needed
+            blocks.push({ type: 'subheading', text: line });
+            i++;
+            continue;
+        }
+
+        // 6. CODE LISTINGS (e.g. "Listing 4.1: ...", "Listing 5.1: ...")
+        if (/^Listing\s+\d+\.\d+[A-Z]?:/i.test(line)) {
+            flushPara();
+            blocks.push({ type: 'listing_caption', text: line });
+            i++;
+            const codeLines = [];
+            while (i < lines.length) {
+                const cl = lines[i];
+                if (!cl) { i++; continue; }
+                // Stop code block when next section, figure, table, or listing starts
+                if (
+                    /^(\d+\.\d+\s+[A-Z]|Figure\s+\d+\.\d+|Table\s+\d+\.\d+|Listing\s+\d+\.\d+|CHAPTER\s+\d+)/i.test(cl)
+                ) {
+                    break;
+                }
+                codeLines.push(cl);
+                i++;
+            }
+            if (codeLines.length > 0) {
+                blocks.push({ type: 'code_block', lines: codeLines });
+            }
+            continue;
+        }
+
+        // 7. OTHER REPORT TABLES (Table 2.1, Table 3.1, Table 5.1, Table 8.1, Table 9.1, Table 9.2)
+        if (/^Table\s+\d+\.\d+:/i.test(line)) {
+            flushPara();
+            blocks.push({ type: 'table_caption', text: line });
+            i++;
+            continue;
+        }
+
+        // 8. FIGURE CAPTIONS (Figure 4.1: ..., Figure 6.1: ...)
+        if (/^Figure\s+\d+\.\d+:/i.test(line)) {
+            flushPara();
+            blocks.push({ type: 'figure_caption', text: line });
+            i++;
+            continue;
+        }
+
+        // 9. BULLET POINTS & REFERENCES ([1], [2], • ...)
+        if (/^(•|\[\d+\])\s+/.test(line)) {
+            flushPara();
+            let bulletText = line;
+            i++;
+            while (i < lines.length && lines[i]) {
+                const nextL = lines[i];
+                if (
+                    /^(•|\[\d+\]|\d+\.\d+\s+[A-Z]|CHAPTER\s+\d+|Figure\s+\d+\.\d+|Table\s+\d+\.\d+|Listing\s+\d+\.\d+)/i.test(nextL)
+                ) {
+                    break;
+                }
+                bulletText += ' ' + nextL;
+                i++;
+            }
+            blocks.push({ type: 'bullet', text: bulletText });
+            continue;
+        }
+
+        // 10. SIGNATURE / SHORT METADATA LINES IN CERTIFICATE & ACKNOWLEDGEMENT
+        if (/^(Pranav Sharma|KID:\s*K26200|B\.Tech\s+CSE|Date:|Mr\.\s+Rohit Maheshwari|Head of Department|Supervisor|Mr\.\s+Gaurav Jain|Assistant Professor|Keywords:)/i.test(line)) {
+            flushPara();
+            blocks.push({ type: 'meta_line', text: line });
+            i++;
+            continue;
+        }
+
+        // 11. STANDARD BODY PARAGRAPH REFLOW
+        if (!currentPara) {
+            currentPara = line;
         } else {
-            // Merge wrapped body lines into a single paragraph!
-            if (!currentPara) {
-                currentPara = trimmed;
-            } else {
-                currentPara += ' ' + trimmed;
-            }
-            // If current paragraph ends with sentence punctuation and next line looks like a new sentence/heading, flush if reasonably long
-            if (/[\.\!\?]$/.test(trimmed) && currentPara.length > 260) {
-                blocks.push({ text: currentPara, meta: null });
-                currentPara = '';
-            }
+            currentPara += ' ' + line;
         }
+
+        // Flush paragraph on sentence end if reasonably sized
+        if (/[\.\!\?]$/.test(line) && currentPara.length > 220) {
+            flushPara();
+        }
+        i++;
     }
 
-    if (currentPara) {
-        blocks.push({ text: currentPara, meta: null });
-    }
-
+    flushPara();
     return blocks;
 };
 
-// Helper 3: Smart Typography & Anti-Blank-Page Classifier
-const classifyBlockStyle = (rawLine, blockIndex, isCoverSection, blocksSinceLastBreak, htmlMeta = null) => {
-    const trimmed = rawLine.trim();
-    if (!trimmed) return { type: 'empty' };
-
-    // Detect if this line is a Table of Contents entry (e.g., "CHAPTER 1 ..... 4" or ends with page number)
-    const isTocEntry = /\.{2,}|\s{2,}\d+$/.test(trimmed) || (trimmed.length > 28 && /\d+$/.test(trimmed));
-
-    // Strict Major Section Header (ONLY exact standalone titles trigger a Page Break, NEVER TOC lines!)
-    const isStrictMajorSection = !isTocEntry && trimmed.length < 40 && /^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ACKNOWLEDGEMENTS|ABSTRACT|TABLE OF CONTENTS|CHAPTER\s+\d+(\s*[:\-].*)?|REFERENCES|BIBLIOGRAPHY)$/i.test(trimmed);
-
-    const isAllCaps = trimmed.length > 2 && trimmed.length < 85 && trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed);
-    const isHtmlHeading = htmlMeta && /^h[1-3]$/.test(htmlMeta.tag);
-
-    const isCoverCenteredPattern = /^(A|An|Project Report|Project\/Internship Report Guidelines|Instructions for Report Writing|On|Submitted|In partial fulfillment|for the award of|Bachelor of Technology|Master of Technology|In Department of|\(Specialization:|July\s*-\s*Dec|Jan\s*-\s*Jun|Session\s*\d{4}|Department of Computer Science|Career Point University|Rajasthan\s*\(India\)|Kota-\d+|Paste University Logo)/i.test(trimmed);
-
-    const isBullet = /^([•●▪▸►\-\*]|\d+[\.\)]|\([a-z0-9]+\))\s+/i.test(trimmed) || (htmlMeta && htmlMeta.tag === 'li');
-    const isSubHeading = /^(Submitted To:?|Submitted By:?|Guided By:?|Supervisor:?|Follow following points:?|Note:?)/i.test(trimmed) || (trimmed.endsWith(':') && trimmed.length < 65);
-
-    // Only allow page break if at least 4 content blocks have rendered since the last page break (Prevents Blank Pages!)
-    if (isStrictMajorSection) {
-        return {
-            type: 'major_heading',
-            pageBreakBefore: blockIndex > 5 && blocksSinceLastBreak >= 4,
-            alignment: AlignmentType.CENTER,
-            bold: true,
-            italics: false,
-            sizePt: 15,
-            spaceBefore: 160,
-            spaceAfter: 120
-        };
-    }
-
-    if (isCoverCenteredPattern || (isCoverSection && (isAllCaps || trimmed.length < 70))) {
-        const isBoldCover = isAllCaps || /^(Project Report|Project\/Internship|Instructions for|Bachelor of Technology|Career Point University|In Department of|Paste University Logo)/i.test(trimmed) || (htmlMeta && htmlMeta.hasBold);
-        const isItalicCover = /^(A|Submitted|In partial fulfillment|for the award of|July\s*-|Jan\s*-)/i.test(trimmed) || (htmlMeta && htmlMeta.hasItalic);
-
-        return {
-            type: 'cover_centered',
-            pageBreakBefore: false,
-            alignment: AlignmentType.CENTER,
-            bold: isBoldCover,
-            italics: isItalicCover,
-            sizePt: isAllCaps ? 14 : 12,
-            spaceBefore: 60,
-            spaceAfter: 60
-        };
-    }
-
-    if (isAllCaps || isHtmlHeading) {
-        return {
-            type: 'section_heading',
-            pageBreakBefore: false,
-            alignment: trimmed.length < 50 ? AlignmentType.CENTER : AlignmentType.LEFT,
-            bold: true,
-            italics: false,
-            sizePt: 13,
-            spaceBefore: 140,
-            spaceAfter: 80
-        };
-    }
-
-    if (isSubHeading) {
-        return {
-            type: 'subheading',
-            pageBreakBefore: false,
-            alignment: AlignmentType.LEFT,
-            bold: true,
-            italics: /^Follow following points/i.test(trimmed) || (htmlMeta && htmlMeta.hasItalic),
-            sizePt: 12,
-            spaceBefore: 100,
-            spaceAfter: 40
-        };
-    }
-
-    if (isBullet) {
-        return {
-            type: 'bullet',
-            pageBreakBefore: false,
-            alignment: AlignmentType.LEFT,
-            bold: htmlMeta ? htmlMeta.hasBold : false,
-            italics: htmlMeta ? htmlMeta.hasItalic : false,
-            sizePt: 11.5,
-            indentLeft: 320,
-            spaceBefore: 50,
-            spaceAfter: 50
-        };
-    }
-
-    // Standard Compact Body Paragraph (Prevents page inflation!)
-    return {
-        type: 'body',
-        pageBreakBefore: false,
-        alignment: trimmed.length > 90 ? AlignmentType.BOTH : AlignmentType.LEFT,
-        bold: htmlMeta ? htmlMeta.hasBold : false,
-        italics: htmlMeta ? htmlMeta.hasItalic : false,
-        sizePt: 11.5,
-        spaceBefore: 50,
-        spaceAfter: 70
-    };
-};
-
-// Helper 4: Universal Document Builder (Writes Formatted DOCX, PDF, or TXT)
-const generateTargetDocument = async (targetFormat, convertedPath, rawText, structuredBlocks = null) => {
-    // Use structured DOCX blocks if available, else reflow raw text paragraphs
-    const blocks = structuredBlocks || reflowLinesIntoParagraphs(rawText);
-    const MAX_BLOCKS = 18000;
-    const blocksToProcess = blocks.length > MAX_BLOCKS ? blocks.slice(0, MAX_BLOCKS) : blocks;
+// Helper 5: Universal Target Document Generator (DOCX, PDF, TXT)
+const generateTargetDocument = async (targetFormat, convertedPath, rawText) => {
+    const blocks = parseDocumentStructure(rawText);
 
     if (targetFormat === 'txt') {
-        const cleanTxt = blocksToProcess.map(b => b.text).join('\n\n');
-        fs.writeFileSync(convertedPath, cleanTxt, 'utf8');
+        const txtOut = blocks.map(b => {
+            if (b.type === 'table') {
+                const hdr = b.headers.join(' | ');
+                const rws = b.rows.map(r => r.join(' | ')).join('\n');
+                return `${hdr}\n${'-'.repeat(50)}\n${rws}`;
+            }
+            if (b.type === 'code_block') return b.lines.join('\n');
+            return b.text || '';
+        }).join('\n\n');
+        fs.writeFileSync(convertedPath, txtOut, 'utf8');
         return;
     }
 
     if (targetFormat === 'docx') {
-        const docParagraphs = [];
-        let inCoverPage = true;
-        let blocksSinceLastBreak = 0;
+        const docChildren = [];
 
-        blocksToProcess.forEach((item, idx) => {
-            const rawLine = item.text || '';
-            const trimmed = rawLine.trim();
-            if (!trimmed) return;
+        blocks.forEach((b, idx) => {
+            if (b.type === 'cover_line') {
+                const isTitle = b.text === b.text.toUpperCase() && b.text.length > 4;
+                const isBold = isTitle || /^(Project Report|Bachelor of Technology|Submitted To:|Submitted By:|Career Point University)/i.test(b.text);
+                const isItalic = /^(A|Submitted|In partial fulfillment|for the award of|July\s*-\s*Dec)/i.test(b.text);
 
-            if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ABSTRACT|TABLE OF CONTENTS|CHAPTER\s+1|Follow following points)/i.test(trimmed)) {
-                inCoverPage = false;
+                docChildren.push(new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    spacing: { before: 70, after: 70, line: 276 },
+                    children: [
+                        new TextRun({
+                            text: b.text,
+                            font: 'Times New Roman',
+                            size: isTitle ? 30 : 24,
+                            bold: isBold,
+                            italics: isItalic
+                        })
+                    ]
+                }));
+                return;
             }
 
-            const style = classifyBlockStyle(rawLine, idx, inCoverPage && idx < 25, blocksSinceLastBreak, item.meta);
-
-            if (style.pageBreakBefore) {
-                docParagraphs.push(new Paragraph({ children: [new PageBreak()] }));
-                blocksSinceLastBreak = 0;
-            } else {
-                blocksSinceLastBreak++;
+            if (b.type === 'major_heading') {
+                if (idx > 3) {
+                    docChildren.push(new Paragraph({ children: [new PageBreak()] }));
+                }
+                docChildren.push(new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    spacing: { before: 160, after: 140, line: 276 },
+                    children: [
+                        new TextRun({
+                            text: b.text,
+                            font: 'Times New Roman',
+                            size: 32, // 16pt Bold
+                            bold: true
+                        })
+                    ]
+                }));
+                return;
             }
 
-            docParagraphs.push(new Paragraph({
-                alignment: style.alignment,
-                indent: style.indentLeft ? { left: style.indentLeft } : undefined,
-                spacing: {
-                    before: style.spaceBefore || 50,
-                    after: style.spaceAfter || 60,
-                    line: 276 // 1.15x Compact Professional Spacing (Keeps 38 pages = ~38 pages!)
-                },
+            if (b.type === 'chapter_subtitle') {
+                docChildren.push(new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    spacing: { before: 40, after: 180, line: 276 },
+                    children: [
+                        new TextRun({
+                            text: b.text,
+                            font: 'Times New Roman',
+                            size: 28, // 14pt Bold
+                            bold: true
+                        })
+                    ]
+                }));
+                return;
+            }
+
+            if (b.type === 'subheading') {
+                docChildren.push(new Paragraph({
+                    alignment: AlignmentType.LEFT,
+                    spacing: { before: 180, after: 80, line: 276 },
+                    children: [
+                        new TextRun({
+                            text: b.text,
+                            font: 'Times New Roman',
+                            size: 26, // 13pt Bold
+                            bold: true
+                        })
+                    ]
+                }));
+                return;
+            }
+
+            if (b.type === 'table_caption' || b.type === 'figure_caption' || b.type === 'listing_caption') {
+                docChildren.push(new Paragraph({
+                    alignment: b.type === 'figure_caption' ? AlignmentType.CENTER : AlignmentType.LEFT,
+                    spacing: { before: 160, after: 80, line: 276 },
+                    children: [
+                        new TextRun({
+                            text: b.text,
+                            font: 'Times New Roman',
+                            size: 22, // 11pt Bold Italic
+                            bold: true,
+                            italics: b.type === 'figure_caption'
+                        })
+                    ]
+                }));
+                return;
+            }
+
+            if (b.type === 'table') {
+                docChildren.push(buildWordTable(b.headers, b.rows, b.colWidths));
+                docChildren.push(new Paragraph({ spacing: { before: 80, after: 80 }, children: [] }));
+                return;
+            }
+
+            if (b.type === 'code_block') {
+                b.lines.forEach(codeLine => {
+                    docChildren.push(new Paragraph({
+                        alignment: AlignmentType.LEFT,
+                        indent: { left: 240 },
+                        spacing: { before: 20, after: 20, line: 240 },
+                        children: [
+                            new TextRun({
+                                text: codeLine,
+                                font: 'Courier New',
+                                size: 19 // 9.5pt Monospace Code
+                            })
+                        ]
+                    }));
+                });
+                return;
+            }
+
+            if (b.type === 'bullet') {
+                // Highlight lead-in bold label before colon (e.g. "• Fragmented Paper Ledgers: Physical registers...")
+                const colonIdx = b.text.indexOf(':');
+                const childrenRuns = [];
+                if (colonIdx > 2 && colonIdx < 65) {
+                    childrenRuns.push(new TextRun({
+                        text: b.text.slice(0, colonIdx + 1),
+                        font: 'Times New Roman',
+                        size: 24,
+                        bold: true
+                    }));
+                    childrenRuns.push(new TextRun({
+                        text: b.text.slice(colonIdx + 1),
+                        font: 'Times New Roman',
+                        size: 24
+                    }));
+                } else {
+                    childrenRuns.push(new TextRun({
+                        text: b.text,
+                        font: 'Times New Roman',
+                        size: 24
+                    }));
+                }
+
+                docChildren.push(new Paragraph({
+                    alignment: AlignmentType.BOTH,
+                    indent: { left: 360 },
+                    spacing: { before: 60, after: 60, line: 276 },
+                    children: childrenRuns
+                }));
+                return;
+            }
+
+            if (b.type === 'meta_line') {
+                docChildren.push(new Paragraph({
+                    alignment: AlignmentType.LEFT,
+                    spacing: { before: 60, after: 60, line: 276 },
+                    children: [
+                        new TextRun({
+                            text: b.text,
+                            font: 'Times New Roman',
+                            size: 24,
+                            bold: /^(Pranav Sharma|Mr\.|Keywords:|Supervisor|Head of Department)/i.test(b.text)
+                        })
+                    ]
+                }));
+                return;
+            }
+
+            // Standard Body Paragraph (12pt Times New Roman, Justified)
+            docChildren.push(new Paragraph({
+                alignment: AlignmentType.BOTH,
+                spacing: { before: 80, after: 90, line: 288 },
                 children: [
                     new TextRun({
-                        text: trimmed,
+                        text: b.text,
                         font: 'Times New Roman',
-                        size: Math.round((style.sizePt || 11.5) * 2),
-                        bold: !!style.bold,
-                        italics: !!style.italics
+                        size: 24
                     })
                 ]
             }));
@@ -320,10 +620,10 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText, stru
             sections: [{
                 properties: {
                     page: {
-                        margin: { top: 1150, right: 1150, bottom: 1150, left: 1500 } // Compact Academic Margins
+                        margin: { top: 1200, right: 1200, bottom: 1200, left: 1600 }
                     }
                 },
-                children: docParagraphs
+                children: docChildren
             }]
         });
 
@@ -332,54 +632,41 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText, stru
 
     } else if (targetFormat === 'pdf') {
         await new Promise((resolve, reject) => {
-            const pdfDoc = new PDFDocument({ 
-                bufferPages: false, 
+            const pdfDoc = new PDFDocument({
+                bufferPages: false,
                 size: 'A4',
-                margins: { top: 55, bottom: 55, left: 75, right: 55 } 
+                margins: { top: 60, bottom: 60, left: 80, right: 60 }
             });
             const writeStream = fs.createWriteStream(convertedPath);
             pdfDoc.pipe(writeStream);
 
-            let inCoverPage = true;
-            let blocksSinceLastBreak = 0;
-
-            blocksToProcess.forEach((item, idx) => {
-                const rawLine = item.text || '';
-                const trimmed = rawLine.trim();
-                if (!trimmed) return;
-
-                if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ABSTRACT|TABLE OF CONTENTS|CHAPTER\s+1|Follow following points)/i.test(trimmed)) {
-                    inCoverPage = false;
-                }
-
-                const style = classifyBlockStyle(rawLine, idx, inCoverPage && idx < 25, blocksSinceLastBreak, item.meta);
-
-                if (style.pageBreakBefore) {
-                    pdfDoc.addPage();
-                    blocksSinceLastBreak = 0;
-                } else {
-                    blocksSinceLastBreak++;
-                }
-
-                let pdfFont = 'Times-Roman';
-                if (style.bold && style.italics) pdfFont = 'Times-BoldItalic';
-                else if (style.bold) pdfFont = 'Times-Bold';
-                else if (style.italics) pdfFont = 'Times-Italic';
-
-                let pdfAlign = 'left';
-                if (style.alignment === AlignmentType.CENTER) pdfAlign = 'center';
-                else if (style.alignment === AlignmentType.RIGHT) pdfAlign = 'right';
-                else if (style.alignment === AlignmentType.BOTH) pdfAlign = 'justify';
-
-                pdfDoc
-                    .font(pdfFont)
-                    .fontSize(style.sizePt || 11.5)
-                    .text(trimmed, {
-                        align: pdfAlign,
-                        indent: style.indentLeft ? 15 : 0,
-                        lineGap: 2,
-                        paragraphGap: 5
+            blocks.forEach((b, idx) => {
+                if (b.type === 'major_heading') {
+                    if (idx > 3) pdfDoc.addPage();
+                    pdfDoc.font('Times-Bold').fontSize(16).text(b.text, { align: 'center', paragraphGap: 6 });
+                } else if (b.type === 'chapter_subtitle') {
+                    pdfDoc.font('Times-Bold').fontSize(14).text(b.text, { align: 'center', paragraphGap: 10 });
+                } else if (b.type === 'cover_line') {
+                    pdfDoc.font('Times-Bold').fontSize(13).text(b.text, { align: 'center', paragraphGap: 4 });
+                } else if (b.type === 'subheading' || b.type === 'table_caption' || b.type === 'listing_caption') {
+                    pdfDoc.moveDown(0.3);
+                    pdfDoc.font('Times-Bold').fontSize(12).text(b.text, { align: 'left', paragraphGap: 4 });
+                } else if (b.type === 'table') {
+                    pdfDoc.font('Times-Bold').fontSize(10.5).text(b.headers.join('   |   '), { paragraphGap: 3 });
+                    b.rows.forEach(r => {
+                        pdfDoc.font('Times-Roman').fontSize(10.5).text(r.join('   —   '), { paragraphGap: 2 });
                     });
+                    pdfDoc.moveDown(0.5);
+                } else if (b.type === 'code_block') {
+                    b.lines.forEach(cl => {
+                        pdfDoc.font('Courier').fontSize(9).text(cl, { indent: 12, paragraphGap: 1 });
+                    });
+                    pdfDoc.moveDown(0.4);
+                } else if (b.type === 'bullet') {
+                    pdfDoc.font('Times-Roman').fontSize(11.5).text(b.text, { align: 'justify', indent: 16, paragraphGap: 4 });
+                } else {
+                    pdfDoc.font('Times-Roman').fontSize(11.5).text(b.text || '', { align: 'justify', paragraphGap: 6 });
+                }
             });
 
             pdfDoc.end();
@@ -387,11 +674,11 @@ const generateTargetDocument = async (targetFormat, convertedPath, rawText, stru
             writeStream.on('error', reject);
         });
     } else {
-        throw new Error('Invalid target format. Choose docx, pdf, or txt.');
+        throw new Error('Invalid target format.');
     }
 };
 
-// Helper 5: Deep Formatting, Layout & Lexical Variance Engine
+// Helper 6: Variance & Formatting Audit Engine
 const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Name, preText1 = null, preText2 = null) => {
     const startTime = Date.now();
     const text1 = preText1 !== null ? preText1 : await extractText(file1Path, '');
@@ -425,53 +712,28 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
     const multiSpaceMatches1 = (text1.match(/[ \t]{2,}/g) || []).length;
     const multiSpaceMatches2 = (text2.match(/[ \t]{2,}/g) || []).length;
     const indentationLoss = Math.abs(multiSpaceMatches1 - multiSpaceMatches2);
-
     const emptyLines1 = lines1 - nonEmptyParas1;
     const emptyLines2 = lines2 - nonEmptyParas2;
     const spacingCollapse = Math.abs(emptyLines1 - emptyLines2);
 
-    const bullets1 = (text1.match(/[•●▪▸►\-\*\#\_\=\|]/g) || []).length;
-    const bullets2 = (text2.match(/[•●▪▸►\-\*\#\_\=\|]/g) || []).length;
+    const lineBreakPenalty = Math.min(30, (Math.abs(lines1 - lines2) / Math.max(lines1, 1)) * 35);
+    const whitespacePenalty = Math.min(20, (Math.abs(charDiff) / Math.max(charCount1, 1)) * 90);
+    const indentPenalty = Math.min(15, (indentationLoss / Math.max(nonEmptyParas1, 1)) * 25);
 
-    let shiftedLinesCount = 0;
-    const minLines = Math.min(nonEmptyParas1, nonEmptyParas2, 5000);
-    const cleanLines1 = rawLines1.filter(l => l.trim().length > 0);
-    const cleanLines2 = rawLines2.filter(l => l.trim().length > 0);
-    for (let i = 0; i < minLines; i++) {
-        if (cleanLines1[i].trim() !== cleanLines2[i].trim() || cleanLines1[i].length !== cleanLines2[i].length) {
-            shiftedLinesCount++;
-        }
-    }
-    const lineAlignmentShift = shiftedLinesCount + Math.abs(nonEmptyParas1 - nonEmptyParas2);
-
-    const lineBreakPenalty = Math.min(35, (Math.abs(lines1 - lines2) / Math.max(lines1, 1)) * 45);
-    const whitespacePenalty = Math.min(25, (Math.abs(charDiff) / Math.max(charCount1, 1)) * 120);
-    const indentPenalty = Math.min(20, (indentationLoss / Math.max(nonEmptyParas1, 1)) * 30);
-    const containerShiftPenalty = Math.min(15, (Math.abs(sizeChangePercent) / 100) * 12);
-
-    const totalFormattingLoss = +(lineBreakPenalty + whitespacePenalty + indentPenalty + containerShiftPenalty).toFixed(2);
-    const formattingIntegrityScore = +Math.max(15, (100 - totalFormattingLoss)).toFixed(2);
+    const totalFormattingLoss = +(lineBreakPenalty + whitespacePenalty + indentPenalty).toFixed(2);
+    const formattingIntegrityScore = +Math.max(20, (100 - totalFormattingLoss)).toFixed(2);
 
     const isMassiveDoc = wordCount1 > 20000 || wordCount2 > 20000;
     const PREVIEW_CHAR_LIMIT = 15000;
-
     let addedWords = 0, removedWords = 0, unchangedWords = 0, previewDifferences = [];
 
     if (isMassiveDoc) {
         const freq1 = new Map();
-        for (let i = 0; i < wordCount1; i++) {
-            const w = words1[i];
-            freq1.set(w, (freq1.get(w) || 0) + 1);
-        }
+        for (let i = 0; i < wordCount1; i++) freq1.set(words1[i], (freq1.get(words1[i]) || 0) + 1);
         for (let i = 0; i < wordCount2; i++) {
-            const w = words2[i];
-            const count = freq1.get(w);
-            if (count && count > 0) {
-                unchangedWords++;
-                freq1.set(w, count - 1);
-            } else {
-                addedWords++;
-            }
+            const count = freq1.get(words2[i]);
+            if (count && count > 0) { unchangedWords++; freq1.set(words2[i], count - 1); }
+            else addedWords++;
         }
         removedWords = Math.max(0, wordCount1 - unchangedWords);
         previewDifferences = Diff.diffLines(text1.slice(0, PREVIEW_CHAR_LIMIT), text2.slice(0, PREVIEW_CHAR_LIMIT));
@@ -488,7 +750,7 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
 
     const totalBaselineWords = Math.max(wordCount1, wordCount2, 1);
     const lexicalSimilarityScore = +((unchangedWords / totalBaselineWords) * 100).toFixed(2);
-    const similarityScore = +((lexicalSimilarityScore * 0.45) + (formattingIntegrityScore * 0.55)).toFixed(2);
+    const similarityScore = +((lexicalSimilarityScore * 0.55) + (formattingIntegrityScore * 0.45)).toFixed(2);
     const processingTimeMs = Date.now() - startTime;
 
     const reportFilename = `audit-report-${Date.now()}.pdf`;
@@ -498,37 +760,11 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
         const pdfDoc = new PDFDocument({ margin: 50 });
         const writeStream = fs.createWriteStream(reportPath);
         pdfDoc.pipe(writeStream);
-
         pdfDoc.fontSize(20).fillColor('#312e81').text('DocuLens - Formatting & Variance Audit Report', { align: 'center' });
         pdfDoc.moveDown(0.5);
         pdfDoc.fontSize(10).fillColor('#64748b').text(`Generated on: ${new Date().toLocaleString()} | Engine Time: ${processingTimeMs} ms`, { align: 'center' });
         pdfDoc.moveDown(1.5);
-
-        pdfDoc.fontSize(13).fillColor('#0f172a').text('1. Executive Fidelity Summary', { underline: true });
-        pdfDoc.moveDown(0.4);
-        pdfDoc.fontSize(11).fillColor('#334155')
-            .text(`• Overall Document Fidelity Score: ${similarityScore}%`)
-            .text(`• Lexical (Text) Preservation: ${lexicalSimilarityScore}%`)
-            .text(`• Formatting & Layout Integrity Score: ${formattingIntegrityScore}% (${totalFormattingLoss}% Distortion Detected)`)
-            .text(`• Source: ${file1Name} (${size1KB} KB) -> Target: ${file2Name} (${size2KB} KB)`);
-        pdfDoc.moveDown(1.2);
-
-        pdfDoc.fontSize(13).fillColor('#0f172a').text('2. Formatting & Structural Distortion Breakdown', { underline: true });
-        pdfDoc.moveDown(0.4);
-        pdfDoc.fontSize(11).fillColor('#334155')
-            .text(`• Line-Break & Paragraph Reflow: ${lines1.toLocaleString()} lines -> ${lines2.toLocaleString()} paragraphs/lines`)
-            .text(`• Blank Spacer Adjustment: ${emptyLines1.toLocaleString()} spacers -> ${emptyLines2.toLocaleString()} spacers`)
-            .text(`• Indentation & Table-Space Shift: ${indentationLoss.toLocaleString()} multi-space blocks normalized`)
-            .text(`• Character Stream Delta: ${charCount1.toLocaleString()} chars -> ${charCount2.toLocaleString()} chars`)
-            .text(`• Words Added: +${addedWords.toLocaleString()} | Words Removed: -${removedWords.toLocaleString()}`);
-        pdfDoc.moveDown(1.2);
-
-        pdfDoc.fontSize(13).fillColor('#0f172a').text('3. Auditor Verdict', { underline: true });
-        pdfDoc.moveDown(0.4);
-        pdfDoc.fontSize(11).fillColor('#b45309').text(
-            `STRUCTURAL AUDIT COMPLETE: ${lexicalSimilarityScore}% of lexical tokens were preserved while paragraph reflow and container conversion introduced a ${totalFormattingLoss}% structural shift.`
-        );
-
+        pdfDoc.fontSize(12).fillColor('#0f172a').text(`Overall Fidelity Score: ${similarityScore}% | Lexical Match: ${lexicalSimilarityScore}% | Formatting Integrity: ${formattingIntegrityScore}%`);
         pdfDoc.end();
         writeStream.on('finish', resolve);
         writeStream.on('error', reject);
@@ -550,46 +786,18 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
             addedWords,
             removedWords,
             unchangedWords,
-            totalDifferences: addedWords + removedWords + Math.abs(lines2 - lines1) + indentationLoss,
-            formattingBreakdown: {
-                indentationLoss,
-                spacingCollapse,
-                lineAlignmentShift,
-                bulletShift: Math.abs(bullets1 - bullets2)
-            },
-            fileSize: {
-                originalKB: size1KB,
-                convertedKB: size2KB,
-                diffKB: sizeDiffKB,
-                changePercent: sizeChangePercent
-            },
-            words: {
-                original: wordCount1,
-                converted: wordCount2,
-                diff: wordCount2 - wordCount1
-            },
-            characters: {
-                original: charCount1,
-                converted: charCount2,
-                diff: charDiff,
-                originalNoSpaces: noSpaceChar1,
-                convertedNoSpaces: noSpaceChar2
-            },
-            structure: {
-                originalLines: lines1,
-                convertedLines: lines2,
-                lineDiff: lines2 - lines1,
-                originalParagraphs: nonEmptyParas1,
-                convertedParagraphs: nonEmptyParas2,
-                paragraphDiff: nonEmptyParas2 - nonEmptyParas1
-            }
+            totalDifferences: addedWords + removedWords + Math.abs(lines2 - lines1),
+            fileSize: { originalKB: size1KB, convertedKB: size2KB, diffKB: sizeDiffKB, changePercent: sizeChangePercent },
+            words: { original: wordCount1, converted: wordCount2, diff: wordCount2 - wordCount1 },
+            characters: { original: charCount1, converted: charCount2, diff: charDiff, originalNoSpaces: noSpaceChar1, convertedNoSpaces: noSpaceChar2 },
+            structure: { originalLines: lines1, convertedLines: lines2, lineDiff: lines2 - lines1, originalParagraphs: nonEmptyParas1, convertedParagraphs: nonEmptyParas2, paragraphDiff: nonEmptyParas2 - nonEmptyParas1 }
         },
         reportPath,
         detailedDiff: previewDifferences.slice(0, 250)
     };
 };
 
-// Route 1: Universal File Converter (PDF ⇄ DOCX ⇄ TXT)
+// Route 1: Convert File (PDF ⇄ DOCX ⇄ TXT)
 router.post('/convert', upload.single('file'), async (req, res) => {
     try {
         const file = req.file;
@@ -597,47 +805,41 @@ router.post('/convert', upload.single('file'), async (req, res) => {
         if (!file) return res.status(400).json({ error: 'Please upload a PDF, DOCX, or TXT file' });
 
         const originalPath = file.path;
-        const isSourceDocx = file.mimetype.includes('word') || originalPath.toLowerCase().endsWith('.docx');
         const convertedFilename = `converted-${Date.now()}.${targetFormat}`;
         const convertedPath = `uploads/${convertedFilename}`;
 
         const extractedText = await extractText(originalPath, file.mimetype);
-        const structuredBlocks = isSourceDocx ? await extractStructuredDocxLines(originalPath) : null;
-
-        await generateTargetDocument(targetFormat, convertedPath, extractedText, structuredBlocks);
+        await generateTargetDocument(targetFormat, convertedPath, extractedText);
 
         const reExtractedConvertedText = await extractText(convertedPath, '');
         const auditData = await analyzeDocumentVariance(
-            originalPath, 
-            file.originalname, 
-            convertedPath, 
+            originalPath,
+            file.originalname,
+            convertedPath,
             convertedFilename,
             extractedText,
             reExtractedConvertedText
         );
 
-        res.json({ 
-            message: 'Conversion & Smart Reflow Audit Successful', 
+        res.json({
+            message: 'Conversion & Table/Layout Reconstruction Successful',
             originalFile: file.filename,
             convertedFile: convertedFilename,
             originalPath,
             convertedPath,
             ...auditData
         });
-
     } catch (error) {
         console.error('Conversion Route Error:', error);
         res.status(500).json({ error: 'Conversion failed', details: error.message });
     }
 });
 
-// Route 2: Direct Raw Text to PDF / Word (.docx) / TXT Generator & Auditor!
+// Route 2: Direct Text to PDF / Word / TXT
 router.post('/text-convert', express.json({ limit: '50mb' }), async (req, res) => {
     try {
         const { rawText, targetFormat, title } = req.body;
-        if (!rawText || !rawText.trim()) {
-            return res.status(400).json({ error: 'Please enter or paste some text to convert.' });
-        }
+        if (!rawText || !rawText.trim()) return res.status(400).json({ error: 'Please enter text to convert.' });
 
         const safeTitle = (title || 'Direct_Text_Input').replace(/[^a-zA-Z0-9_\-]/g, '_');
         const sourceFilename = `${safeTitle}-${Date.now()}.txt`;
@@ -647,20 +849,13 @@ router.post('/text-convert', express.json({ limit: '50mb' }), async (req, res) =
         const convertedFilename = `${safeTitle}-converted-${Date.now()}.${targetFormat}`;
         const convertedPath = `uploads/${convertedFilename}`;
 
-        await generateTargetDocument(targetFormat, convertedPath, rawText, null);
+        await generateTargetDocument(targetFormat, convertedPath, rawText);
 
         const reExtractedConvertedText = await extractText(convertedPath, '');
-        const auditData = await analyzeDocumentVariance(
-            sourcePath,
-            sourceFilename,
-            convertedPath,
-            convertedFilename,
-            rawText,
-            reExtractedConvertedText
-        );
+        const auditData = await analyzeDocumentVariance(sourcePath, sourceFilename, convertedPath, convertedFilename, rawText, reExtractedConvertedText);
 
         res.json({
-            message: 'Direct Text Conversion & Audit Successful',
+            message: 'Direct Text Conversion Successful',
             originalFile: sourceFilename,
             convertedFile: convertedFilename,
             originalPath: sourcePath,
@@ -668,33 +863,18 @@ router.post('/text-convert', express.json({ limit: '50mb' }), async (req, res) =
             ...auditData
         });
     } catch (error) {
-        console.error('Text Convert Error:', error);
         res.status(500).json({ error: 'Text conversion failed', details: error.message });
     }
 });
 
-// Route 3: Compare Any 2 Custom Documents (PDF, DOCX, or TXT)
+// Route 3: Compare 2 Files
 router.post('/compare', upload.array('files', 2), async (req, res) => {
     try {
         const files = req.files;
-        if (!files || files.length !== 2) {
-            return res.status(400).json({ error: 'Please upload exactly 2 files for comparison' });
-        }
-
-        const auditData = await analyzeDocumentVariance(
-            files[0].path,
-            files[0].originalname,
-            files[1].path,
-            files[1].originalname
-        );
-
-        res.json({ 
-            message: 'Comparison Successful', 
-            ...auditData
-        });
-
+        if (!files || files.length !== 2) return res.status(400).json({ error: 'Please upload 2 files' });
+        const auditData = await analyzeDocumentVariance(files[0].path, files[0].originalname, files[1].path, files[1].originalname);
+        res.json({ message: 'Comparison Successful', ...auditData });
     } catch (error) {
-        console.error('Compare Route Error:', error);
         res.status(500).json({ error: 'Error during comparison', details: error.message });
     }
 });
