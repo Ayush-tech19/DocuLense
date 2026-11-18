@@ -24,32 +24,34 @@ const upload = multer({
     limits: { fileSize: 200 * 1024 * 1024 }
 });
 
-// Helper 1: Fast Raw Text Extraction
-const extractText = async (filePath, mimeType) => {
-    if (mimeType === 'application/pdf' || filePath.toLowerCase().endsWith('.pdf')) {
+// Helper 1: Universal Text Extractor (Supports PDF, DOCX, and TXT!)
+const extractText = async (filePath, mimeType = '') => {
+    const lowerPath = filePath.toLowerCase();
+    if (mimeType === 'application/pdf' || lowerPath.endsWith('.pdf')) {
         const dataBuffer = fs.readFileSync(filePath);
         const parseFn = typeof pdfExtract === 'function' ? pdfExtract : pdfExtract.default;
         const data = await parseFn(dataBuffer);
         return data.text || '';
     } else if (
         mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || 
-        filePath.toLowerCase().endsWith('.docx')
+        lowerPath.endsWith('.docx')
     ) {
         const result = await mammoth.extractRawText({ path: filePath });
         return result.value || '';
+    } else if (mimeType === 'text/plain' || lowerPath.endsWith('.txt')) {
+        return fs.readFileSync(filePath, 'utf8') || '';
     } else {
-        throw new Error('Unsupported format. Only PDF or DOCX allowed.');
+        throw new Error('Unsupported format. Allowed formats: PDF, DOCX, TXT.');
     }
 };
 
-// Helper 1B: Extract Rich Structured Blocks from DOCX (Preserves Bold, Italic, Headings, Lists!)
+// Helper 1B: Extract Rich Structured Blocks from DOCX
 const extractStructuredDocxLines = async (filePath) => {
     try {
         const htmlResult = await mammoth.convertToHtml({ path: filePath });
         const html = htmlResult.value || '';
         if (!html) return null;
 
-        // Split HTML by block-level tags
         const blockRegex = /<(h[1-6]|p|li)[^>]*>([\s\S]*?)<\/\1>/gi;
         const blocks = [];
         let match;
@@ -67,14 +69,12 @@ const extractStructuredDocxLines = async (filePath) => {
                 .replace(/&quot;/g, '"')
                 .trim();
 
-            const hasBold = /<(strong|b)\b/i.test(innerHtml);
-            const hasItalic = /<(em|i)\b/i.test(innerHtml);
-
+            if (!cleanText) continue;
             blocks.push({
                 tag,
                 text: tag === 'li' ? `• ${cleanText}` : cleanText,
-                hasBold,
-                hasItalic
+                hasBold: /<(strong|b)\b/i.test(innerHtml),
+                hasItalic: /<(em|i)\b/i.test(innerHtml)
             });
         }
         return blocks.length > 0 ? blocks : null;
@@ -83,55 +83,115 @@ const extractStructuredDocxLines = async (filePath) => {
     }
 };
 
-// Helper 2: Smart Typography & Layout Classifier (Reconstructs Academic & Enterprise Formatting)
-const classifyLineStyle = (rawLine, lineIndex, isCoverSection, htmlMeta = null) => {
+// Helper 2: Smart Paragraph Reflow Engine (Fixes 38 pages turning into 69 pages!)
+// Merges broken PDF line-wraps back into natural paragraphs while keeping headings/lists separate
+const reflowLinesIntoParagraphs = (rawText) => {
+    const rawLines = rawText.split(/\r?\n/);
+    const blocks = [];
+    let currentPara = '';
+    let inCoverArea = true;
+
+    const isStandaloneLine = (trimmed, idx) => {
+        if (!trimmed) return true;
+        // Stop cover area once main content or TOC starts
+        if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ABSTRACT|TABLE OF CONTENTS|CHAPTER\s+1|Follow following points)/i.test(trimmed)) {
+            inCoverArea = false;
+        }
+        // Keep cover page lines separate (first 28 lines if short)
+        if (inCoverArea && idx < 28 && trimmed.length < 75) return true;
+        // Major section headers
+        if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ACKNOWLEDGEMENTS|ABSTRACT|TABLE OF CONTENTS|LIST OF FIGURES|LIST OF TABLES|CHAPTER\s+\d+|REFERENCES|BIBLIOGRAPHY)/i.test(trimmed)) return true;
+        // TOC lines with dots or trailing page numbers (e.g. "1. Introduction ...... 5" or "Chapter 1   12")
+        if (/\.{3,}|\s{3,}\d+$/.test(trimmed)) return true;
+        // Bullet points or numbered lists
+        if (/^([•●▪▸►\-\*]|\d+[\.\)]|\([a-z0-9]+\))\s+/i.test(trimmed)) return true;
+        // Short ALL-CAPS headings or lines ending with colon
+        if (trimmed.length < 75 && trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed)) return true;
+        if (trimmed.endsWith(':') && trimmed.length < 65) return true;
+        // Short metadata labels
+        if (/^(Submitted To|Submitted By|Guided By|Supervisor|Mr\.|Ms\.|Dr\.|Prof\.|Department of|Career Point|Rajasthan|Page\s*\d+)/i.test(trimmed) && trimmed.length < 75) return true;
+
+        return false;
+    };
+
+    for (let i = 0; i < rawLines.length; i++) {
+        const trimmed = rawLines[i].trim();
+
+        // Remove running page footers like "... | Page 2" or "Page 12 of 38" so they don't break paragraphs
+        if (/\|\s*Page\s*\d+/i.test(trimmed) || /^Page\s*\d+(\s*of\s*\d+)?$/i.test(trimmed)) {
+            continue;
+        }
+
+        if (!trimmed) {
+            if (currentPara) {
+                blocks.push({ text: currentPara, meta: null });
+                currentPara = '';
+            }
+            continue;
+        }
+
+        if (isStandaloneLine(trimmed, i)) {
+            if (currentPara) {
+                blocks.push({ text: currentPara, meta: null });
+                currentPara = '';
+            }
+            blocks.push({ text: trimmed, meta: null });
+        } else {
+            // Merge wrapped body lines into a single paragraph!
+            if (!currentPara) {
+                currentPara = trimmed;
+            } else {
+                currentPara += ' ' + trimmed;
+            }
+            // If current paragraph ends with sentence punctuation and next line looks like a new sentence/heading, flush if reasonably long
+            if (/[\.\!\?]$/.test(trimmed) && currentPara.length > 260) {
+                blocks.push({ text: currentPara, meta: null });
+                currentPara = '';
+            }
+        }
+    }
+
+    if (currentPara) {
+        blocks.push({ text: currentPara, meta: null });
+    }
+
+    return blocks;
+};
+
+// Helper 3: Smart Typography & Anti-Blank-Page Classifier
+const classifyBlockStyle = (rawLine, blockIndex, isCoverSection, blocksSinceLastBreak, htmlMeta = null) => {
     const trimmed = rawLine.trim();
     if (!trimmed) return { type: 'empty' };
 
-    // 1. Page Break & Major Section Triggers
-    const isPageHeaderTrigger = /^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ACKNOWLEDGEMENTS|ABSTRACT|TABLE OF CONTENTS|LIST OF FIGURES|LIST OF TABLES|CHAPTER\s+\d+|REFERENCES|BIBLIOGRAPHY)/i.test(trimmed);
-    const isFooterLine = /\|\s*Page\s*\d+/i.test(trimmed) || /^Page\s*\d+\s*(of\s*\d+)?$/i.test(trimmed);
+    // Detect if this line is a Table of Contents entry (e.g., "CHAPTER 1 ..... 4" or ends with page number)
+    const isTocEntry = /\.{2,}|\s{2,}\d+$/.test(trimmed) || (trimmed.length > 28 && /\d+$/.test(trimmed));
 
-    // 2. Headings Detection (ALL CAPS or HTML h1-h3)
-    const isAllCaps = trimmed.length > 2 && trimmed.length < 90 && trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed);
+    // Strict Major Section Header (ONLY exact standalone titles trigger a Page Break, NEVER TOC lines!)
+    const isStrictMajorSection = !isTocEntry && trimmed.length < 40 && /^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ACKNOWLEDGEMENTS|ABSTRACT|TABLE OF CONTENTS|CHAPTER\s+\d+(\s*[:\-].*)?|REFERENCES|BIBLIOGRAPHY)$/i.test(trimmed);
+
+    const isAllCaps = trimmed.length > 2 && trimmed.length < 85 && trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed);
     const isHtmlHeading = htmlMeta && /^h[1-3]$/.test(htmlMeta.tag);
 
-    // 3. University / Project Report Cover Page Patterns (Center-Aligned)
     const isCoverCenteredPattern = /^(A|An|Project Report|Project\/Internship Report Guidelines|Instructions for Report Writing|On|Submitted|In partial fulfillment|for the award of|Bachelor of Technology|Master of Technology|In Department of|\(Specialization:|July\s*-\s*Dec|Jan\s*-\s*Jun|Session\s*\d{4}|Department of Computer Science|Career Point University|Rajasthan\s*\(India\)|Kota-\d+|Paste University Logo)/i.test(trimmed);
 
-    // 4. Bullet Points & Numbered Lists
     const isBullet = /^([•●▪▸►\-\*]|\d+[\.\)]|\([a-z0-9]+\))\s+/i.test(trimmed) || (htmlMeta && htmlMeta.tag === 'li');
+    const isSubHeading = /^(Submitted To:?|Submitted By:?|Guided By:?|Supervisor:?|Follow following points:?|Note:?)/i.test(trimmed) || (trimmed.endsWith(':') && trimmed.length < 65);
 
-    // 5. Subheadings & Metadata Labels ("Submitted To:", "Submitted By:", "Follow following points:")
-    const isSubHeading = /^(Submitted To:?|Submitted By:?|Guided By:?|Supervisor:?|Mr\.|Ms\.|Mrs\.|Dr\.|Prof\.|Follow following points:?|Note:?)/i.test(trimmed) || (trimmed.endsWith(':') && trimmed.length < 65);
-
-    if (isPageHeaderTrigger) {
+    // Only allow page break if at least 4 content blocks have rendered since the last page break (Prevents Blank Pages!)
+    if (isStrictMajorSection) {
         return {
             type: 'major_heading',
-            pageBreakBefore: lineIndex > 6,
+            pageBreakBefore: blockIndex > 5 && blocksSinceLastBreak >= 4,
             alignment: AlignmentType.CENTER,
             bold: true,
             italics: false,
-            sizePt: 16,
-            spaceBefore: 280,
-            spaceAfter: 220
-        };
-    }
-
-    if (isFooterLine) {
-        return {
-            type: 'footer',
-            pageBreakBefore: false,
-            alignment: AlignmentType.RIGHT,
-            bold: false,
-            italics: true,
-            sizePt: 10,
+            sizePt: 15,
             spaceBefore: 160,
-            spaceAfter: 240
+            spaceAfter: 120
         };
     }
 
-    if (isCoverCenteredPattern || (isCoverSection && (isAllCaps || trimmed.length < 75))) {
+    if (isCoverCenteredPattern || (isCoverSection && (isAllCaps || trimmed.length < 70))) {
         const isBoldCover = isAllCaps || /^(Project Report|Project\/Internship|Instructions for|Bachelor of Technology|Career Point University|In Department of|Paste University Logo)/i.test(trimmed) || (htmlMeta && htmlMeta.hasBold);
         const isItalicCover = /^(A|Submitted|In partial fulfillment|for the award of|July\s*-|Jan\s*-)/i.test(trimmed) || (htmlMeta && htmlMeta.hasItalic);
 
@@ -141,9 +201,9 @@ const classifyLineStyle = (rawLine, lineIndex, isCoverSection, htmlMeta = null) 
             alignment: AlignmentType.CENTER,
             bold: isBoldCover,
             italics: isItalicCover,
-            sizePt: isAllCaps ? 15 : 13,
-            spaceBefore: 110,
-            spaceAfter: 110
+            sizePt: isAllCaps ? 14 : 12,
+            spaceBefore: 60,
+            spaceAfter: 60
         };
     }
 
@@ -151,12 +211,12 @@ const classifyLineStyle = (rawLine, lineIndex, isCoverSection, htmlMeta = null) 
         return {
             type: 'section_heading',
             pageBreakBefore: false,
-            alignment: trimmed.length < 60 ? AlignmentType.CENTER : AlignmentType.LEFT,
+            alignment: trimmed.length < 50 ? AlignmentType.CENTER : AlignmentType.LEFT,
             bold: true,
             italics: false,
-            sizePt: 14,
-            spaceBefore: 220,
-            spaceAfter: 130
+            sizePt: 13,
+            spaceBefore: 140,
+            spaceAfter: 80
         };
     }
 
@@ -168,8 +228,8 @@ const classifyLineStyle = (rawLine, lineIndex, isCoverSection, htmlMeta = null) 
             bold: true,
             italics: /^Follow following points/i.test(trimmed) || (htmlMeta && htmlMeta.hasItalic),
             sizePt: 12,
-            spaceBefore: 140,
-            spaceAfter: 70
+            spaceBefore: 100,
+            spaceAfter: 40
         };
     }
 
@@ -180,33 +240,163 @@ const classifyLineStyle = (rawLine, lineIndex, isCoverSection, htmlMeta = null) 
             alignment: AlignmentType.LEFT,
             bold: htmlMeta ? htmlMeta.hasBold : false,
             italics: htmlMeta ? htmlMeta.hasItalic : false,
-            sizePt: 12,
-            indentLeft: 360,
-            spaceBefore: 90,
-            spaceAfter: 90
+            sizePt: 11.5,
+            indentLeft: 320,
+            spaceBefore: 50,
+            spaceAfter: 50
         };
     }
 
-    // Standard Body Paragraph (Justified for full paragraphs, Left for short lines)
+    // Standard Compact Body Paragraph (Prevents page inflation!)
     return {
         type: 'body',
         pageBreakBefore: false,
-        alignment: trimmed.length > 85 ? AlignmentType.BOTH : AlignmentType.LEFT,
+        alignment: trimmed.length > 90 ? AlignmentType.BOTH : AlignmentType.LEFT,
         bold: htmlMeta ? htmlMeta.hasBold : false,
         italics: htmlMeta ? htmlMeta.hasItalic : false,
-        sizePt: 12,
-        spaceBefore: 100,
-        spaceAfter: 110
+        sizePt: 11.5,
+        spaceBefore: 50,
+        spaceAfter: 70
     };
 };
 
-// Helper 3: Deep Formatting, Layout & Lexical Variance Engine
+// Helper 4: Universal Document Builder (Writes Formatted DOCX, PDF, or TXT)
+const generateTargetDocument = async (targetFormat, convertedPath, rawText, structuredBlocks = null) => {
+    // Use structured DOCX blocks if available, else reflow raw text paragraphs
+    const blocks = structuredBlocks || reflowLinesIntoParagraphs(rawText);
+    const MAX_BLOCKS = 18000;
+    const blocksToProcess = blocks.length > MAX_BLOCKS ? blocks.slice(0, MAX_BLOCKS) : blocks;
+
+    if (targetFormat === 'txt') {
+        const cleanTxt = blocksToProcess.map(b => b.text).join('\n\n');
+        fs.writeFileSync(convertedPath, cleanTxt, 'utf8');
+        return;
+    }
+
+    if (targetFormat === 'docx') {
+        const docParagraphs = [];
+        let inCoverPage = true;
+        let blocksSinceLastBreak = 0;
+
+        blocksToProcess.forEach((item, idx) => {
+            const rawLine = item.text || '';
+            const trimmed = rawLine.trim();
+            if (!trimmed) return;
+
+            if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ABSTRACT|TABLE OF CONTENTS|CHAPTER\s+1|Follow following points)/i.test(trimmed)) {
+                inCoverPage = false;
+            }
+
+            const style = classifyBlockStyle(rawLine, idx, inCoverPage && idx < 25, blocksSinceLastBreak, item.meta);
+
+            if (style.pageBreakBefore) {
+                docParagraphs.push(new Paragraph({ children: [new PageBreak()] }));
+                blocksSinceLastBreak = 0;
+            } else {
+                blocksSinceLastBreak++;
+            }
+
+            docParagraphs.push(new Paragraph({
+                alignment: style.alignment,
+                indent: style.indentLeft ? { left: style.indentLeft } : undefined,
+                spacing: {
+                    before: style.spaceBefore || 50,
+                    after: style.spaceAfter || 60,
+                    line: 276 // 1.15x Compact Professional Spacing (Keeps 38 pages = ~38 pages!)
+                },
+                children: [
+                    new TextRun({
+                        text: trimmed,
+                        font: 'Times New Roman',
+                        size: Math.round((style.sizePt || 11.5) * 2),
+                        bold: !!style.bold,
+                        italics: !!style.italics
+                    })
+                ]
+            }));
+        });
+
+        const doc = new Document({
+            sections: [{
+                properties: {
+                    page: {
+                        margin: { top: 1150, right: 1150, bottom: 1150, left: 1500 } // Compact Academic Margins
+                    }
+                },
+                children: docParagraphs
+            }]
+        });
+
+        const buffer = await Packer.toBuffer(doc);
+        fs.writeFileSync(convertedPath, buffer);
+
+    } else if (targetFormat === 'pdf') {
+        await new Promise((resolve, reject) => {
+            const pdfDoc = new PDFDocument({ 
+                bufferPages: false, 
+                size: 'A4',
+                margins: { top: 55, bottom: 55, left: 75, right: 55 } 
+            });
+            const writeStream = fs.createWriteStream(convertedPath);
+            pdfDoc.pipe(writeStream);
+
+            let inCoverPage = true;
+            let blocksSinceLastBreak = 0;
+
+            blocksToProcess.forEach((item, idx) => {
+                const rawLine = item.text || '';
+                const trimmed = rawLine.trim();
+                if (!trimmed) return;
+
+                if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ABSTRACT|TABLE OF CONTENTS|CHAPTER\s+1|Follow following points)/i.test(trimmed)) {
+                    inCoverPage = false;
+                }
+
+                const style = classifyBlockStyle(rawLine, idx, inCoverPage && idx < 25, blocksSinceLastBreak, item.meta);
+
+                if (style.pageBreakBefore) {
+                    pdfDoc.addPage();
+                    blocksSinceLastBreak = 0;
+                } else {
+                    blocksSinceLastBreak++;
+                }
+
+                let pdfFont = 'Times-Roman';
+                if (style.bold && style.italics) pdfFont = 'Times-BoldItalic';
+                else if (style.bold) pdfFont = 'Times-Bold';
+                else if (style.italics) pdfFont = 'Times-Italic';
+
+                let pdfAlign = 'left';
+                if (style.alignment === AlignmentType.CENTER) pdfAlign = 'center';
+                else if (style.alignment === AlignmentType.RIGHT) pdfAlign = 'right';
+                else if (style.alignment === AlignmentType.BOTH) pdfAlign = 'justify';
+
+                pdfDoc
+                    .font(pdfFont)
+                    .fontSize(style.sizePt || 11.5)
+                    .text(trimmed, {
+                        align: pdfAlign,
+                        indent: style.indentLeft ? 15 : 0,
+                        lineGap: 2,
+                        paragraphGap: 5
+                    });
+            });
+
+            pdfDoc.end();
+            writeStream.on('finish', resolve);
+            writeStream.on('error', reject);
+        });
+    } else {
+        throw new Error('Invalid target format. Choose docx, pdf, or txt.');
+    }
+};
+
+// Helper 5: Deep Formatting, Layout & Lexical Variance Engine
 const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Name, preText1 = null, preText2 = null) => {
     const startTime = Date.now();
     const text1 = preText1 !== null ? preText1 : await extractText(file1Path, '');
     const text2 = preText2 !== null ? preText2 : await extractText(file2Path, '');
 
-    // 1. File Size Metrics (KB)
     const stat1 = fs.statSync(file1Path);
     const stat2 = fs.statSync(file2Path);
     const size1KB = +(stat1.size / 1024).toFixed(2);
@@ -214,7 +404,6 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
     const sizeDiffKB = +(size2KB - size1KB).toFixed(2);
     const sizeChangePercent = size1KB > 0 ? +(((size2KB - size1KB) / size1KB) * 100).toFixed(1) : 0;
 
-    // 2. Word & Character Metrics
     const words1 = text1.trim().split(/\s+/).filter(Boolean);
     const words2 = text2.trim().split(/\s+/).filter(Boolean);
     const wordCount1 = words1.length;
@@ -226,7 +415,6 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
     const noSpaceChar1 = text1.replace(/\s+/g, '').length;
     const noSpaceChar2 = text2.replace(/\s+/g, '').length;
 
-    // 3. Structural & Formatting Distortion Metrics
     const rawLines1 = text1.split(/\r?\n/);
     const rawLines2 = text2.split(/\r?\n/);
     const lines1 = rawLines1.length;
@@ -264,14 +452,10 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
     const totalFormattingLoss = +(lineBreakPenalty + whitespacePenalty + indentPenalty + containerShiftPenalty).toFixed(2);
     const formattingIntegrityScore = +Math.max(15, (100 - totalFormattingLoss)).toFixed(2);
 
-    // 4. Lexical Word Diff (Hybrid High-Scale Engine)
     const isMassiveDoc = wordCount1 > 20000 || wordCount2 > 20000;
     const PREVIEW_CHAR_LIMIT = 15000;
 
-    let addedWords = 0;
-    let removedWords = 0;
-    let unchangedWords = 0;
-    let previewDifferences = [];
+    let addedWords = 0, removedWords = 0, unchangedWords = 0, previewDifferences = [];
 
     if (isMassiveDoc) {
         const freq1 = new Map();
@@ -290,10 +474,7 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
             }
         }
         removedWords = Math.max(0, wordCount1 - unchangedWords);
-        previewDifferences = Diff.diffLines(
-            text1.slice(0, PREVIEW_CHAR_LIMIT), 
-            text2.slice(0, PREVIEW_CHAR_LIMIT)
-        );
+        previewDifferences = Diff.diffLines(text1.slice(0, PREVIEW_CHAR_LIMIT), text2.slice(0, PREVIEW_CHAR_LIMIT));
     } else {
         const differences = Diff.diffWordsWithSpace(text1, text2);
         differences.forEach(part => {
@@ -310,7 +491,6 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
     const similarityScore = +((lexicalSimilarityScore * 0.45) + (formattingIntegrityScore * 0.55)).toFixed(2);
     const processingTimeMs = Date.now() - startTime;
 
-    // 5. Generate Official Audit Report PDF
     const reportFilename = `audit-report-${Date.now()}.pdf`;
     const reportPath = `uploads/${reportFilename}`;
 
@@ -330,23 +510,23 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
             .text(`• Overall Document Fidelity Score: ${similarityScore}%`)
             .text(`• Lexical (Text) Preservation: ${lexicalSimilarityScore}%`)
             .text(`• Formatting & Layout Integrity Score: ${formattingIntegrityScore}% (${totalFormattingLoss}% Distortion Detected)`)
-            .text(`• Original File: ${file1Name} (${size1KB} KB) -> Target File: ${file2Name} (${size2KB} KB)`);
+            .text(`• Source: ${file1Name} (${size1KB} KB) -> Target: ${file2Name} (${size2KB} KB)`);
         pdfDoc.moveDown(1.2);
 
         pdfDoc.fontSize(13).fillColor('#0f172a').text('2. Formatting & Structural Distortion Breakdown', { underline: true });
         pdfDoc.moveDown(0.4);
         pdfDoc.fontSize(11).fillColor('#334155')
-            .text(`• Line-Break & Page-Wrap Shift: ${lines1.toLocaleString()} lines -> ${lines2.toLocaleString()} lines (Delta: ${lines2 - lines1})`)
-            .text(`• Paragraph / Block Collapse: ${emptyLines1.toLocaleString()} blank spacers -> ${emptyLines2.toLocaleString()} spacers (Lost: ${spacingCollapse})`)
-            .text(`• Indentation & Table-Space Loss: ${indentationLoss.toLocaleString()} multi-space alignment blocks altered`)
-            .text(`• Whitespace & Character Drift: ${charCount1.toLocaleString()} chars -> ${charCount2.toLocaleString()} chars (Diff: ${charDiff})`)
+            .text(`• Line-Break & Paragraph Reflow: ${lines1.toLocaleString()} lines -> ${lines2.toLocaleString()} paragraphs/lines`)
+            .text(`• Blank Spacer Adjustment: ${emptyLines1.toLocaleString()} spacers -> ${emptyLines2.toLocaleString()} spacers`)
+            .text(`• Indentation & Table-Space Shift: ${indentationLoss.toLocaleString()} multi-space blocks normalized`)
+            .text(`• Character Stream Delta: ${charCount1.toLocaleString()} chars -> ${charCount2.toLocaleString()} chars`)
             .text(`• Words Added: +${addedWords.toLocaleString()} | Words Removed: -${removedWords.toLocaleString()}`);
         pdfDoc.moveDown(1.2);
 
         pdfDoc.fontSize(13).fillColor('#0f172a').text('3. Auditor Verdict', { underline: true });
         pdfDoc.moveDown(0.4);
         pdfDoc.fontSize(11).fillColor('#b45309').text(
-            `STRUCTURAL VARIANCE DETECTED: While ${lexicalSimilarityScore}% of raw words were preserved, conversion induced a ${totalFormattingLoss}% formatting distortion across line wraps, paragraph spacing, and container structure.`
+            `STRUCTURAL AUDIT COMPLETE: ${lexicalSimilarityScore}% of lexical tokens were preserved while paragraph reflow and container conversion introduced a ${totalFormattingLoss}% structural shift.`
         );
 
         pdfDoc.end();
@@ -409,167 +589,24 @@ const analyzeDocumentVariance = async (file1Path, file1Name, file2Path, file2Nam
     };
 };
 
-// Route 1: Smart Structure-Preserving Convert + Re-Extracted Audit
+// Route 1: Universal File Converter (PDF ⇄ DOCX ⇄ TXT)
 router.post('/convert', upload.single('file'), async (req, res) => {
     try {
         const file = req.file;
         const { targetFormat } = req.body;
-        if (!file) return res.status(400).json({ error: 'Please upload a file' });
+        if (!file) return res.status(400).json({ error: 'Please upload a PDF, DOCX, or TXT file' });
 
         const originalPath = file.path;
         const isSourceDocx = file.mimetype.includes('word') || originalPath.toLowerCase().endsWith('.docx');
         const convertedFilename = `converted-${Date.now()}.${targetFormat}`;
         const convertedPath = `uploads/${convertedFilename}`;
 
-        console.log(`📄 Extracting baseline text & structure from ${file.originalname}...`);
         const extractedText = await extractText(originalPath, file.mimetype);
         const structuredBlocks = isSourceDocx ? await extractStructuredDocxLines(originalPath) : null;
 
-        // Build unified line items with optional HTML style hints
-        const rawLines = structuredBlocks
-            ? structuredBlocks.map(b => ({ text: b.text, meta: b }))
-            : extractedText.split(/\r?\n/).map(l => ({ text: l, meta: null }));
+        await generateTargetDocument(targetFormat, convertedPath, extractedText, structuredBlocks);
 
-        const MAX_LINES = 15000;
-        const linesToProcess = rawLines.length > MAX_LINES ? rawLines.slice(0, MAX_LINES) : rawLines;
-
-        console.log(`⚙️ Smart-Formatting & Converting to .${targetFormat}...`);
-
-        if (targetFormat === 'docx') {
-            const docParagraphs = [];
-            let emptyStreak = 0;
-            let inCoverPage = true;
-
-            linesToProcess.forEach((item, idx) => {
-                const rawLine = item.text || '';
-                const trimmed = rawLine.trim();
-
-                // Exit cover-page centering once main sections begin
-                if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ABSTRACT|CHAPTER\s+1|Follow following points)/i.test(trimmed)) {
-                    inCoverPage = false;
-                }
-
-                // Preserve vertical blank spacing (up to 2 consecutive empty lines)
-                if (!trimmed) {
-                    emptyStreak++;
-                    if (emptyStreak <= 2) {
-                        docParagraphs.push(new Paragraph({
-                            spacing: { before: 60, after: 60 },
-                            children: [new TextRun({ text: '', font: 'Times New Roman', size: 24 })]
-                        }));
-                    }
-                    return;
-                }
-                emptyStreak = 0;
-
-                const style = classifyLineStyle(rawLine, idx, inCoverPage && idx < 35, item.meta);
-
-                if (style.pageBreakBefore) {
-                    docParagraphs.push(new Paragraph({ children: [new PageBreak()] }));
-                }
-
-                docParagraphs.push(new Paragraph({
-                    alignment: style.alignment,
-                    indent: style.indentLeft ? { left: style.indentLeft } : undefined,
-                    spacing: {
-                        before: style.spaceBefore || 100,
-                        after: style.spaceAfter || 100,
-                        line: 340 // ~1.45x Academic Line Spacing
-                    },
-                    children: [
-                        new TextRun({
-                            text: trimmed,
-                            font: 'Times New Roman',
-                            size: (style.sizePt || 12) * 2,
-                            bold: !!style.bold,
-                            italics: !!style.italics
-                        })
-                    ]
-                }));
-            });
-
-            const doc = new Document({
-                sections: [{
-                    properties: {
-                        page: {
-                            // Top: 1", Bottom: 1", Left: 1.5" (2160 twips), Right: 1"
-                            margin: { top: 1440, right: 1440, bottom: 1440, left: 2160 }
-                        }
-                    },
-                    children: docParagraphs
-                }]
-            });
-
-            const buffer = await Packer.toBuffer(doc);
-            fs.writeFileSync(convertedPath, buffer);
-
-        } else if (targetFormat === 'pdf') {
-            await new Promise((resolve, reject) => {
-                // Top: 1" (72pt), Bottom: 1" (72pt), Left: 1.5" (108pt), Right: 1" (72pt)
-                const pdfDoc = new PDFDocument({ 
-                    bufferPages: false, 
-                    size: 'A4',
-                    margins: { top: 72, bottom: 72, left: 108, right: 72 } 
-                });
-                const writeStream = fs.createWriteStream(convertedPath);
-                pdfDoc.pipe(writeStream);
-
-                let emptyStreak = 0;
-                let inCoverPage = true;
-
-                linesToProcess.slice(0, 25000).forEach((item, idx) => {
-                    const rawLine = item.text || '';
-                    const trimmed = rawLine.trim();
-
-                    if (/^(CERTIFICATE|DECLARATION|ACKNOWLEDGEMENT|ABSTRACT|CHAPTER\s+1|Follow following points)/i.test(trimmed)) {
-                        inCoverPage = false;
-                    }
-
-                    if (!trimmed) {
-                        emptyStreak++;
-                        if (emptyStreak <= 2) pdfDoc.moveDown(0.55);
-                        return;
-                    }
-                    emptyStreak = 0;
-
-                    const style = classifyLineStyle(rawLine, idx, inCoverPage && idx < 35, item.meta);
-
-                    if (style.pageBreakBefore) {
-                        pdfDoc.addPage();
-                    }
-
-                    let pdfFont = 'Times-Roman';
-                    if (style.bold && style.italics) pdfFont = 'Times-BoldItalic';
-                    else if (style.bold) pdfFont = 'Times-Bold';
-                    else if (style.italics) pdfFont = 'Times-Italic';
-
-                    let pdfAlign = 'left';
-                    if (style.alignment === AlignmentType.CENTER) pdfAlign = 'center';
-                    else if (style.alignment === AlignmentType.RIGHT) pdfAlign = 'right';
-                    else if (style.alignment === AlignmentType.BOTH) pdfAlign = 'justify';
-
-                    pdfDoc
-                        .font(pdfFont)
-                        .fontSize(style.sizePt || 12)
-                        .text(trimmed, {
-                            align: pdfAlign,
-                            indent: style.indentLeft ? 18 : 0,
-                            lineGap: 4,
-                            paragraphGap: 4
-                        });
-                });
-
-                pdfDoc.end();
-                writeStream.on('finish', resolve);
-                writeStream.on('error', reject);
-            });
-        } else {
-            return res.status(400).json({ error: 'Invalid target format' });
-        }
-
-        console.log(`🔍 Re-extracting converted file to measure formatting preservation...`);
         const reExtractedConvertedText = await extractText(convertedPath, '');
-
         const auditData = await analyzeDocumentVariance(
             originalPath, 
             file.originalname, 
@@ -579,9 +616,8 @@ router.post('/convert', upload.single('file'), async (req, res) => {
             reExtractedConvertedText
         );
 
-        console.log(`✅ Conversion & Smart Layout Audit Complete in ${auditData.processingTimeMs}ms!`);
         res.json({ 
-            message: 'Conversion & Smart Layout Audit Successful', 
+            message: 'Conversion & Smart Reflow Audit Successful', 
             originalFile: file.filename,
             convertedFile: convertedFilename,
             originalPath,
@@ -595,7 +631,49 @@ router.post('/convert', upload.single('file'), async (req, res) => {
     }
 });
 
-// Route 2: Compare Any 2 Custom Documents
+// Route 2: Direct Raw Text to PDF / Word (.docx) / TXT Generator & Auditor!
+router.post('/text-convert', express.json({ limit: '50mb' }), async (req, res) => {
+    try {
+        const { rawText, targetFormat, title } = req.body;
+        if (!rawText || !rawText.trim()) {
+            return res.status(400).json({ error: 'Please enter or paste some text to convert.' });
+        }
+
+        const safeTitle = (title || 'Direct_Text_Input').replace(/[^a-zA-Z0-9_\-]/g, '_');
+        const sourceFilename = `${safeTitle}-${Date.now()}.txt`;
+        const sourcePath = `uploads/${sourceFilename}`;
+        fs.writeFileSync(sourcePath, rawText, 'utf8');
+
+        const convertedFilename = `${safeTitle}-converted-${Date.now()}.${targetFormat}`;
+        const convertedPath = `uploads/${convertedFilename}`;
+
+        await generateTargetDocument(targetFormat, convertedPath, rawText, null);
+
+        const reExtractedConvertedText = await extractText(convertedPath, '');
+        const auditData = await analyzeDocumentVariance(
+            sourcePath,
+            sourceFilename,
+            convertedPath,
+            convertedFilename,
+            rawText,
+            reExtractedConvertedText
+        );
+
+        res.json({
+            message: 'Direct Text Conversion & Audit Successful',
+            originalFile: sourceFilename,
+            convertedFile: convertedFilename,
+            originalPath: sourcePath,
+            convertedPath,
+            ...auditData
+        });
+    } catch (error) {
+        console.error('Text Convert Error:', error);
+        res.status(500).json({ error: 'Text conversion failed', details: error.message });
+    }
+});
+
+// Route 3: Compare Any 2 Custom Documents (PDF, DOCX, or TXT)
 router.post('/compare', upload.array('files', 2), async (req, res) => {
     try {
         const files = req.files;

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DocuLens Pro - Live Diff Studio & Visual Analytics</title>
+    <title>DocuLens Pro - Universal Document & Text Studio</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
@@ -27,70 +27,104 @@
                         DocuLens Studio
                     </h1>
                     <span class="text-xs bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 px-2.5 py-0.5 rounded-full font-semibold">
-                        v2.0 High-Scale Engine
+                        v3.0 Universal Reflow Engine
                     </span>
                 </div>
-                <p class="text-slate-400 text-sm mt-1">Universal Document Conversion, Real-Time Split Diff Sandbox & Visual Telemetry (Up to 3,000+ Pages)</p>
+                <p class="text-slate-400 text-sm mt-1">PDF ⇄ Word (.docx) ⇄ Text (.txt) Conversion, Smart Paragraph Reflow & Formatting Distortion Telemetry</p>
             </div>
             <div class="flex items-center gap-3 text-xs text-slate-400 bg-slate-900 px-4 py-2 rounded-lg border border-slate-800">
                 <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span>Node.js v24 Stream Engine Active</span>
+                <span>Smart Anti-Blank-Page & Reflow Active</span>
             </div>
         </div>
 
-        <!-- Top Control Modules -->
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- Top 3 Control Modules -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
-            <!-- STEP 1: CONVERT & AUTO-AUDIT -->
+            <!-- MODULE 1: UNIVERSAL FILE CONVERTER (PDF / DOCX / TXT) -->
             <div class="bg-slate-900/90 p-6 rounded-xl border border-slate-800 shadow-xl flex flex-col justify-between">
                 <div>
                     <div class="flex items-center justify-between mb-4">
-                        <h2 class="text-lg font-bold text-sky-400">⚡ Step 1: Convert & Auto-Audit</h2>
-                        <span class="text-xs bg-sky-950 text-sky-300 border border-sky-800 px-2.5 py-0.5 rounded-full">1-Click Pipeline</span>
+                        <h2 class="text-base font-bold text-sky-400">⚡ 1. File Converter (PDF ⇄ Word ⇄ TXT)</h2>
+                        <span class="text-[11px] bg-sky-950 text-sky-300 border border-sky-800 px-2 py-0.5 rounded-full">Auto-Reflow</span>
                     </div>
                     <form id="convertForm" class="space-y-4">
                         <div>
-                            <label class="block text-xs font-medium text-slate-400 uppercase mb-1.5">Upload Source File (PDF or DOCX)</label>
-                            <input type="file" id="convertFile" required class="w-full text-sm text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-sky-600 file:text-white hover:file:bg-sky-500 cursor-pointer bg-slate-950 border border-slate-800 rounded-md p-1">
+                            <label class="block text-xs font-medium text-slate-400 uppercase mb-1.5">Upload File (.PDF, .DOCX, or .TXT)</label>
+                            <input type="file" id="convertFile" accept=".pdf,.docx,.txt" required class="w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-sky-600 file:text-white hover:file:bg-sky-500 cursor-pointer bg-slate-950 border border-slate-800 rounded-md p-1">
                         </div>
                         <div>
-                            <label class="block text-xs font-medium text-slate-400 uppercase mb-1.5">Target Format</label>
-                            <select id="targetFormat" class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-md text-slate-200 focus:outline-none focus:border-sky-500 text-sm">
-                                <option value="docx">Microsoft Word (.docx)</option>
-                                <option value="pdf">PDF Document (.pdf)</option>
+                            <label class="block text-xs font-medium text-slate-400 uppercase mb-1.5">Convert To Target Format</label>
+                            <select id="targetFormat" class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-md text-slate-200 focus:outline-none focus:border-sky-500 text-xs">
+                                <option value="docx">Microsoft Word (.docx) — Smart Reflow</option>
+                                <option value="pdf">PDF Document (.pdf) — Academic Layout</option>
+                                <option value="txt">Plain Text (.txt) — Raw Extracted Text</option>
                             </select>
                         </div>
-                        <button type="submit" id="convertBtn" class="w-full bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2.5 px-4 rounded-lg transition shadow-lg">
-                            Convert & Launch Analytics Studio
+                        <button type="submit" id="convertBtn" class="w-full bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2.5 px-4 rounded-lg transition shadow-lg text-sm">
+                            Convert File & Audit Layout
                         </button>
                     </form>
                 </div>
                 
-                <div id="convertResult" class="mt-4 hidden p-3.5 bg-emerald-950/40 border border-emerald-800/80 rounded-lg text-emerald-300 flex items-center justify-between">
-                    <span class="text-sm font-medium">✅ Converted & Audited!</span>
+                <div id="convertResult" class="mt-4 hidden p-3 bg-emerald-950/40 border border-emerald-800/80 rounded-lg text-emerald-300 flex items-center justify-between">
+                    <span class="text-xs font-medium">✅ Converted!</span>
                     <a id="downloadLink" href="#" download class="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-3 py-1.5 rounded-md transition">
-                        ⬇ Download Converted File
+                        ⬇ Download File
                     </a>
                 </div>
             </div>
 
-            <!-- STEP 2: MANUAL 2-FILE COMPARISON -->
+            <!-- MODULE 2: DIRECT TEXT TO PDF / WORD GENERATOR -->
+            <div class="bg-slate-900/90 p-6 rounded-xl border border-slate-800 shadow-xl flex flex-col justify-between">
+                <div>
+                    <div class="flex items-center justify-between mb-3">
+                        <h2 class="text-base font-bold text-emerald-400">📝 2. Direct Text → PDF / Word</h2>
+                        <span class="text-[11px] bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.5 rounded-full">Instant Composer</span>
+                    </div>
+                    <form id="textConvertForm" class="space-y-3">
+                        <div>
+                            <textarea id="directTextInput" rows="4" required placeholder="Paste or type raw text, notes, or report content here to generate a formatted PDF or Word document..." class="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-md text-xs text-slate-200 focus:outline-none focus:border-emerald-500 resize-none"></textarea>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <input type="text" id="directTitleInput" placeholder="File Name (e.g. Notes)" class="p-2 bg-slate-950 border border-slate-800 rounded-md text-xs text-slate-200 focus:outline-none focus:border-emerald-500">
+                            <select id="directTargetFormat" class="p-2 bg-slate-950 border border-slate-800 rounded-md text-slate-200 focus:outline-none focus:border-emerald-500 text-xs">
+                                <option value="pdf">Export as PDF (.pdf)</option>
+                                <option value="docx">Export as Word (.docx)</option>
+                                <option value="txt">Export as Text (.txt)</option>
+                            </select>
+                        </div>
+                        <button type="submit" id="textConvertBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 px-4 rounded-lg transition shadow-lg text-sm">
+                            Generate Document from Text
+                        </button>
+                    </form>
+                </div>
+
+                <div id="textConvertResult" class="mt-3 hidden p-3 bg-emerald-950/40 border border-emerald-800/80 rounded-lg text-emerald-300 flex items-center justify-between">
+                    <span class="text-xs font-medium">✅ Document Ready!</span>
+                    <a id="textDownloadLink" href="#" download class="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-3 py-1.5 rounded-md transition">
+                        ⬇ Download
+                    </a>
+                </div>
+            </div>
+
+            <!-- MODULE 3: DUAL FILE VARIANCE CHECK -->
             <div class="bg-slate-900/90 p-6 rounded-xl border border-slate-800 shadow-xl flex flex-col justify-between">
                 <div>
                     <div class="flex items-center justify-between mb-4">
-                        <h2 class="text-lg font-bold text-indigo-400">🔍 Step 2: Custom 2-File Variance Check</h2>
-                        <span class="text-xs bg-indigo-950 text-indigo-300 border border-indigo-800 px-2.5 py-0.5 rounded-full">Dual Upload</span>
+                        <h2 class="text-base font-bold text-indigo-400">🔍 3. Custom 2-File Variance Check</h2>
+                        <span class="text-[11px] bg-indigo-950 text-indigo-300 border border-indigo-800 px-2 py-0.5 rounded-full">Dual Upload</span>
                     </div>
                     <form id="compareForm" class="space-y-4">
                         <div>
-                            <label class="block text-xs font-medium text-slate-400 uppercase mb-1.5">Original Document (Baseline)</label>
-                            <input type="file" id="file1" required class="w-full text-sm text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer bg-slate-950 border border-slate-800 rounded-md p-1">
+                            <label class="block text-xs font-medium text-slate-400 uppercase mb-1.5">Original Document (PDF / DOCX / TXT)</label>
+                            <input type="file" id="file1" accept=".pdf,.docx,.txt" required class="w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer bg-slate-950 border border-slate-800 rounded-md p-1">
                         </div>
                         <div>
                             <label class="block text-xs font-medium text-slate-400 uppercase mb-1.5">Modified / Converted Document</label>
-                            <input type="file" id="file2" required class="w-full text-sm text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer bg-slate-950 border border-slate-800 rounded-md p-1">
+                            <input type="file" id="file2" accept=".pdf,.docx,.txt" required class="w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer bg-slate-950 border border-slate-800 rounded-md p-1">
                         </div>
-                        <button type="submit" id="compareBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 px-4 rounded-lg transition shadow-lg">
+                        <button type="submit" id="compareBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 px-4 rounded-lg transition shadow-lg text-sm">
                             Compare Selected Files
                         </button>
                     </form>
@@ -105,12 +139,12 @@
             <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-4">
                 <div>
                     <div class="flex flex-wrap items-center gap-2.5">
-                        <h2 class="text-2xl font-bold text-emerald-400">📊 Deep Variance & Visual Telemetry</h2>
+                        <h2 class="text-2xl font-bold text-emerald-400">📊 Deep Formatting & Variance Telemetry</h2>
                         <span id="liveIndicator" class="hidden text-[11px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2.5 py-0.5 rounded-full">
                             ⚡ Live Sandbox Mode
                         </span>
                     </div>
-                    <p class="text-xs text-slate-400 mt-0.5">Real-time lexical accuracy, storage footprint compression, readability index, and split-pane diffing</p>
+                    <p class="text-xs text-slate-400 mt-0.5">Composite fidelity score, formatting integrity %, layout distortion telemetry, and real-time split diff</p>
                 </div>
                 <a id="auditReportLink" href="#" target="_blank" class="inline-flex items-center justify-center bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm px-4 py-2.5 rounded-lg transition shadow-md">
                     📄 Download PDF Audit Report
@@ -120,22 +154,22 @@
             <!-- Row 1: Primary KPI Cards -->
             <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div class="bg-slate-950 p-4 rounded-lg border border-slate-800 text-center">
-                    <p class="text-xs text-slate-400 uppercase tracking-wider">Similarity Score</p>
+                    <p class="text-xs text-slate-400 uppercase tracking-wider">Overall Fidelity Score</p>
                     <p id="similarityScore" class="text-3xl font-extrabold text-emerald-400 mt-1">100%</p>
-                    <p class="text-[11px] text-slate-500 mt-1">Lexical Match Accuracy</p>
+                    <p class="text-[11px] text-slate-500 mt-1">Text + Layout Composite</p>
                 </div>
                 <div class="bg-slate-950 p-4 rounded-lg border border-slate-800 text-center">
-                    <p class="text-xs text-slate-400 uppercase tracking-wider">Words Added</p>
-                    <p id="addedCount" class="text-3xl font-extrabold text-green-400 mt-1">+0</p>
-                    <p class="text-[11px] text-slate-500 mt-1">New tokens inserted</p>
+                    <p class="text-xs text-slate-400 uppercase tracking-wider">Formatting Integrity</p>
+                    <p id="addedCount" class="text-3xl font-extrabold text-green-400 mt-1">100%</p>
+                    <p class="text-[11px] text-slate-500 mt-1">Structure & Spacing Retained</p>
                 </div>
                 <div class="bg-slate-950 p-4 rounded-lg border border-slate-800 text-center">
-                    <p class="text-xs text-slate-400 uppercase tracking-wider">Words Removed</p>
-                    <p id="removedCount" class="text-3xl font-extrabold text-red-400 mt-1">-0</p>
-                    <p class="text-[11px] text-slate-500 mt-1">Tokens omitted</p>
+                    <p class="text-xs text-slate-400 uppercase tracking-wider">Layout Distortion</p>
+                    <p id="removedCount" class="text-3xl font-extrabold text-red-400 mt-1">-0%</p>
+                    <p class="text-[11px] text-slate-500 mt-1">Reflow & Wrapping Shift</p>
                 </div>
                 <div class="bg-slate-950 p-4 rounded-lg border border-slate-800 text-center">
-                    <p class="text-xs text-slate-400 uppercase tracking-wider">Total Word Delta</p>
+                    <p class="text-xs text-slate-400 uppercase tracking-wider">Total Structural Shifts</p>
                     <p id="totalCount" class="text-3xl font-extrabold text-amber-400 mt-1">0</p>
                     <p id="unchangedSub" class="text-[11px] text-slate-500 mt-1">0 words unchanged</p>
                 </div>
@@ -145,7 +179,7 @@
             <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div class="bg-slate-950 p-5 rounded-xl border border-slate-800 flex flex-col justify-between">
                     <div class="flex items-center justify-between mb-3">
-                        <h3 class="text-xs font-bold text-slate-300 uppercase tracking-wider">🎯 Lexical Composition</h3>
+                        <h3 class="text-xs font-bold text-slate-300 uppercase tracking-wider">🎯 Lexical & Structural Split</h3>
                         <span class="text-[11px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/60">Live Chart</span>
                     </div>
                     <div class="relative h-48 flex items-center justify-center">
@@ -211,7 +245,7 @@
                     <span class="font-bold text-amber-400 uppercase block mb-1">📐 Structural Layout</span>
                     <div class="flex justify-between"><span>Line Breaks:</span> <strong id="linesComp">0 → 0</strong></div>
                     <div class="flex justify-between"><span>Paragraphs:</span> <strong id="parasComp">0 → 0</strong></div>
-                    <div class="flex justify-between text-slate-400 pt-1 border-t border-slate-800"><span>Para Delta:</span> <span id="paraDiff">0</span></div>
+                    <div class="flex justify-between text-slate-400 pt-1 border-t border-slate-800"><span>Para Reflow:</span> <span id="paraDiff">0</span></div>
                 </div>
             </div>
 
@@ -220,7 +254,7 @@
                 <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-800 pb-3">
                     <div>
                         <h3 class="text-base font-bold text-slate-100">⚡ GitHub-Style Side-by-Side Split Diff & Live Editor</h3>
-                        <p class="text-xs text-slate-400">Type or delete words inside the right-hand editor to see real-time variance recalculation & diff highlighting!</p>
+                        <p class="text-xs text-slate-400">Type or edit inside the right-hand editor to see real-time variance recalculation!</p>
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
                         <button type="button" id="simulateEditBtn" class="text-xs bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/40 px-3 py-1.5 rounded-md font-semibold transition">
@@ -262,10 +296,10 @@
 
                 <div class="pt-2">
                     <div class="flex items-center justify-between mb-1.5">
-                        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">🔬 Unified Inline Diff Stream (Added vs Removed)</span>
+                        <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider">🔬 Unified Inline Diff Stream</span>
                         <div class="flex gap-3 text-xs">
-                            <span class="text-green-400">+ Green = Added in Right Pane</span>
-                            <span class="text-red-400">- Red Strikethrough = Removed from Left Pane</span>
+                            <span class="text-green-400">+ Green = Added</span>
+                            <span class="text-red-400">- Red Strikethrough = Removed</span>
                         </div>
                     </div>
                     <div id="unifiedDiffStream" class="bg-slate-900/90 p-3.5 rounded-lg border border-slate-800 text-xs font-mono leading-relaxed max-h-44 overflow-y-auto whitespace-pre-wrap text-slate-300"></div>
@@ -338,7 +372,7 @@
             lexicalChartInstance = new Chart(ctxLex, {
                 type: 'doughnut',
                 data: {
-                    labels: ['Unchanged Words', 'Added Words', 'Removed Words'],
+                    labels: ['Retained Tokens', 'Added / Reflowed', 'Removed / Collapsed'],
                     datasets: [{
                         data: [unchanged, added, removed],
                         backgroundColor: ['#10b981', '#22c55e', '#ef4444'],
@@ -360,7 +394,7 @@
                 sizeChartInstance = new Chart(ctxSize, {
                     type: 'bar',
                     data: {
-                        labels: ['Original File (KB)', 'Converted File (KB)'],
+                        labels: ['Source Size (KB)', 'Target Size (KB)'],
                         datasets: [{
                             label: 'File Size (KB)',
                             data: [origKB, convKB],
@@ -467,12 +501,12 @@
 
             recalculateLiveDiff(baselineTextGlobal, initialConvertedTextGlobal, false);
             updateNLPAnalytics(initialConvertedTextGlobal, v.words.converted);
-// Populate Full Document Metrics + Formatting Distortion from Backend
+
             document.getElementById('similarityScore').innerText = `${v.similarityScore}%`;
             document.getElementById('addedCount').innerText = `${v.formattingIntegrityScore || v.similarityScore}%`;
             document.getElementById('removedCount').innerText = `-${v.totalFormattingLoss || 0}%`;
             document.getElementById('totalCount').innerText = v.totalDifferences.toLocaleString();
-            document.getElementById('unchangedSub').innerText = `Text Match: ${v.lexicalSimilarityScore || 100}% | Layout Shifts: ${v.totalDifferences.toLocaleString()}`;
+            document.getElementById('unchangedSub').innerText = `Text Match: ${v.lexicalSimilarityScore || 100}% | Shifts: ${v.totalDifferences.toLocaleString()}`;
 
             const signSize = v.fileSize.diffKB >= 0 ? '+' : '';
             document.getElementById('sizeOrig').innerText = `${v.fileSize.originalKB.toLocaleString()} KB`;
@@ -491,13 +525,13 @@
 
             document.getElementById('linesComp').innerText = `${v.structure.originalLines.toLocaleString()} → ${v.structure.convertedLines.toLocaleString()}`;
             document.getElementById('parasComp').innerText = `${v.structure.originalParagraphs.toLocaleString()} → ${v.structure.convertedParagraphs.toLocaleString()}`;
-            document.getElementById('paraDiff').innerText = `${v.structure.paragraphDiff >= 0 ? '+' : ''}${v.structure.paragraphDiff.toLocaleString()} paras`;
+            document.getElementById('paraDiff').innerText = `${v.structure.paragraphDiff >= 0 ? '+' : ''}${v.structure.paragraphDiff.toLocaleString()} blocks`;
 
             if (data.reportPath) {
                 document.getElementById('auditReportLink').href = '/' + data.reportPath;
             }
 
-            updateCharts(v.unchangedWords, v.addedWords, v.removedWords, v.fileSize.originalKB, v.fileSize.convertedKB);
+            updateCharts(v.unchangedWords, v.addedWords + 1, v.removedWords + Math.round(v.totalFormattingLoss), v.fileSize.originalKB, v.fileSize.convertedKB);
 
             const safeJson = { ...data, rawText: "[Truncated in JSON view for performance]", detailedDiff: `[Showing ${data.detailedDiff.length} preview chunks]` };
             document.getElementById('jsonOutput').innerText = JSON.stringify(safeJson, null, 2);
@@ -545,6 +579,7 @@
             modeEditBtn.className = 'px-2 py-0.5 rounded text-slate-400 hover:text-white text-[11px]';
         });
 
+        // Form 1: File Convert (PDF / DOCX / TXT)
         document.getElementById('convertForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const file = document.getElementById('convertFile').files[0];
@@ -557,7 +592,7 @@
             formData.append('file', file);
             formData.append('targetFormat', format);
 
-            btn.innerText = 'Converting & Launching Studio...';
+            btn.innerText = 'Reflowing & Converting...';
             btn.disabled = true;
 
             try {
@@ -573,11 +608,47 @@
             } catch (err) {
                 alert('Request failed: ' + err.message);
             } finally {
-                btn.innerText = 'Convert & Launch Analytics Studio';
+                btn.innerText = 'Convert File & Audit Layout';
                 btn.disabled = false;
             }
         });
 
+        // Form 2: Direct Text to PDF / Word / TXT
+        document.getElementById('textConvertForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const rawText = document.getElementById('directTextInput').value;
+            const title = document.getElementById('directTitleInput').value || 'DocuLens_Notes';
+            const targetFormat = document.getElementById('directTargetFormat').value;
+            const btn = document.getElementById('textConvertBtn');
+            const resultDiv = document.getElementById('textConvertResult');
+            const downloadLink = document.getElementById('textDownloadLink');
+
+            btn.innerText = 'Generating Document...';
+            btn.disabled = true;
+
+            try {
+                const response = await fetch('/api/documents/text-convert', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ rawText, targetFormat, title })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    resultDiv.classList.remove('hidden');
+                    downloadLink.href = '/' + data.convertedPath;
+                    renderVarianceReport(data);
+                } else {
+                    alert('Error: ' + (data.details || data.error));
+                }
+            } catch (err) {
+                alert('Request failed: ' + err.message);
+            } finally {
+                btn.innerText = 'Generate Document from Text';
+                btn.disabled = false;
+            }
+        });
+
+        // Form 3: Compare 2 Files
         document.getElementById('compareForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const file1 = document.getElementById('file1').files[0];
